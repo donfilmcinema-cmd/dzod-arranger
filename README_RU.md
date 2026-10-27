@@ -5,7 +5,7 @@
 Synth, Backs, Vocal, Other — WAV 48 кГц 24 бит) → сохранить стемы / экспорт песни (MP3 320, WAV 24, WAV 16).
 Методика — `shared/docs/song-assembly_RU.md` в dzod-hub; макет окна — design (ARRANGER v3).
 
-Сейчас готово **ядро 0.2** (C++17, JUCE 8, Stemmer core) и программа проверки без окна `DZODArrangerTool`:
+Сейчас готово **ядро 0.2.1** (C++17, JUCE 8, Stemmer core) и программа проверки без окна `DZODArrangerTool`:
 
 ```
 DZODArrangerTool analyse <папка версии> <кэш>

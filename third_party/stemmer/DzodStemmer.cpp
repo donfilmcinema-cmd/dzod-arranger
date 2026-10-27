@@ -241,6 +241,35 @@ Vec spectrum (const Vec& y, int start, int len, int order, juce::dsp::FFT& fft)
     fft.performFrequencyOnlyForwardTransform (b.data(), true); b.resize ((size_t) (N / 2 + 1)); return b;
 }
 
+
+// Выпрямление сетки: для каждой доли - прямая по соседям ±w (без самой доли, с отбрасыванием выбросов);
+// доля дальше tol от прямой ставится на неё. Медленный разгон сохраняется, местные «вилки» уходят.
+void straighten (VecD& bt, int w, double tol)
+{
+    const int n = (int) bt.size(); if (n < 2 * w + 1) return;
+    for (int pass = 0; pass < 2; ++pass)
+    {
+        VecD out (bt);
+        for (int i = w; i < n - w; ++i)                       // только с соседями с обеих сторон: края (начало и конец сетки) не трогаются
+        {
+            const int a = i - w, b = i + w;
+            std::vector<char> use ((size_t) (b - a + 1), 1); use[(size_t) (i - a)] = 0;
+            double k = 0, c = 0;
+            for (int it = 0; it < 3; ++it)
+            {
+                double sx = 0, sy = 0, sxx = 0, sxy = 0, m = 0;
+                for (int j = a; j <= b; ++j) if (use[(size_t) (j - a)]) { sx += j; sy += bt[(size_t) j]; sxx += (double) j * j; sxy += j * bt[(size_t) j]; m += 1; }
+                if (m < 4) break;
+                k = (m * sxy - sx * sy) / juce::jmax (1e-12, m * sxx - sx * sx); c = (sy - k * sx) / m;
+                for (int j = a; j <= b; ++j) if (j != i) use[(size_t) (j - a)] = std::abs (bt[(size_t) j] - (k * j + c)) < tol;
+            }
+            const double fit = k * i + c;
+            if (std::abs (bt[(size_t) i] - fit) > tol) out[(size_t) i] = fit;
+        }
+        bt.swap (out);
+    }
+}
+
 // Темп без подсказки: автокорреляция кривой атак по всей музыке, кандидаты 60-200 BPM (доля, 2, 4, 8 долей),
 // между темпом и его половиной / удвоением выбирает мягкое предпочтение ~120 BPM (лог-гаусс).
 double estimateTempo (const Vec& o, int a0, int a1, double FR)
@@ -368,6 +397,7 @@ bool Stemmer::analyse (const Job& job, Progress progress)
     if (first < 0 || last - first < 16) { error = ru ("Не удалось найти доли. Проверьте темп проекта."); return false; }
     VecD bt; { VecD xi, yi; for (int i = first; i <= last; ++i) if (ok[(size_t) i]) { xi.push_back (i); yi.push_back (ref[(size_t) i]); } for (int i = first; i <= last; ++i) bt.push_back (interp (i, xi, yi)); }
     savgol11 (bt);
+    if (job.straightenGrid) straighten (bt, 8, 0.010);
     const double p0 = (bt[8] - bt[0]) / 8.0, p1 = (bt.back() - bt[bt.size() - 9]) / 8.0, dur = (double) I.fullMono.size() / I.sr;
     I.grid.clear(); for (int k = (int) (bt[0] / p0); k >= 1; --k) I.grid.push_back (bt[0] - p0 * k);
     I.grid.insert (I.grid.end(), bt.begin(), bt.end());

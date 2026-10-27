@@ -45,7 +45,7 @@ static void printReport (const juce::var& r)
 
 static int verify (const juce::File& drums, double bpm, const juce::StringArray& seams)
 {
-    Stemmer st; dzod::stemmer::Job job; job.drums = drums; job.full = drums; job.projectBpm = bpm;
+    Stemmer st; dzod::stemmer::Job job; job.drums = drums; job.full = drums; job.projectBpm = bpm; job.straightenGrid = true;
     if (! st.analyse (job, nullptr)) { out ("ERROR " + st.lastError()); return 1; }
     const auto& g = st.analysis().grid;
     const double beat = 60.0 / bpm;
@@ -112,7 +112,8 @@ int main (int argc, char** argv)
         Project p; if (! p.load (juce::File (argv[2]), err)) { out ("ERROR " + err); return 1; }
         for (auto& v : p.versions) if (! Engine::analyseVersion (v, juce::File (argv[3]), nullptr, err)) { out ("ERROR " + err); return 1; }
         auto tp = Engine::analyseTempo (p);
-        for (size_t i = 0; i < tp.pieceBpm.size(); ++i) out ("  piece " + juce::String ((int) i + 1) + " " + p.pieces[i].version + ": " + juce::String (tp.pieceBpm[i], 2) + " BPM");
+        for (size_t i = 0; i < tp.pieceBpm.size(); ++i) out ("  piece " + juce::String ((int) i + 1) + " " + p.pieces[i].version + ": " + juce::String (tp.pieceBpm[i], 2) + " BPM, "
+                                                             + juce::String (tp.deviationPct[i], 2) + " %");
         out ("median " + juce::String (tp.median, 1) + ", drums sample " + juce::String (tp.drumsSample, 1) + ", proposed " + juce::String (tp.proposed, 1));
         return 0;
     }
@@ -135,27 +136,37 @@ int main (int argc, char** argv)
         Version a; a.id = "A"; VersionStem s1; s1.outRole = "drums"; s1.role = "drums"; VersionStem s2 = s1; s2.outRole = "guitar"; s2.role = "guitar"; a.stems = { s1, s2 };
         Version b = a; b.id = "B";
         p.versions = { a, b };
-        p.pieces = { { "A", 10, 20, {} }, { "B", 30, 50, {} } };
+        p.pieces = { p.makePiece ("A", 10, 20), p.makePiece ("B", 30, 50) };
         p.sample = 1; p.samples["drums"] = 0;
-        p.markers = { { "Verse", 0, 10 }, { "Chorus", 10, 30 } };
+        History h;
         check (std::abs (p.tableLength() - 30) < 1e-9, "длина стола 30 с");
         check (p.pieceAt (15) == 1 && p.pieceAt (5) == 0 && p.pieceAt (31) == -1, "кусок под курсором");
-        check (p.splitAll (4) == 1 && p.pieces.size() == 3 && std::abs (p.pieces[0].to - 14) < 1e-9 && std::abs (p.pieces[1].from - 14) < 1e-9, "S: разрез 1-го куска на 4 с (14 с версии A)");
+        h.push (p); const int verse = p.setPart ({ 0 }, "Verse");
+        h.push (p); check (p.splitAll (4) == 1 && p.pieces.size() == 3 && std::abs (p.pieces[0].to - 14) < 1e-9 && std::abs (p.pieces[1].from - 14) < 1e-9, "S: разрез 1-го куска на 4 с (14 с версии A)");
+        check (p.pieces[0].part == verse && p.pieces[1].part == verse && p.pieces[0].id != p.pieces[1].id, "метка части — на обеих половинах, id разные");
         check (p.sample == 2 && p.samples["drums"] == 0, "образцы сдвинулись");
         check (p.splitAll (20, { 0 }) == 0, "S с выделением: курсор не над выделенным — не режет");
         check (! p.split (0, 0.01), "у самого края не режет");
-        p.move (2, 0);
-        check (p.pieces[0].version == "B" && p.sample == 0 && p.samples["drums"] == 1, "перетаскивание: образцы за кусками");
-        p.pieces[1].off.insert ("guitar"); p.versions[1].off.insert ("drums");
-        check (! p.isOn (p.pieces[1], "guitar") && p.isOn (p.pieces[2], "guitar") && ! p.isOn (p.pieces[0], "drums"), "× в куске и плитка варианта");
+        const int idB = p.pieces[2].id;
+        h.push (p); p.move (2, 0);
+        check (p.pieces[0].id == idB && p.sample == 0 && p.samples["drums"] == 1, "перетаскивание: образцы за кусками");
+        { auto sc = p.sections(); check (sc.size() == 1 && sc[0].label == "Verse" && sc[0].firstPiece == 1 && sc[0].lastPiece == 2, "метка едет с кусками"); }
+        h.push (p); p.setPart ({ 0 }, "Chorus");
+        { auto sc = p.sections(); check (sc.size() == 2 && sc[0].label == "Chorus", "две части"); }
+        h.push (p); p.pieces[1].off.insert ("guitar"); p.versions[1].off.insert ("drums");
+        check (! p.isOn (p.pieces[1], "guitar") && p.isOn (p.pieces[2], "guitar") && ! p.isOn (p.pieces[0], "drums"), "убрать инструмент из куска и плитка варианта");
         check (p.rolesInSong().size() == 2, "строки стола: drums, guitar");
-        p.versions[0].off.insert ("drums");
+        h.push (p); p.versions[0].off.insert ("drums");
         check (p.rolesInSong().size() == 1, "drums выключен везде — строки нет");
-        p.remove (0);   // убрать B (20 с) — маркеры сдвигаются
-        check (p.pieces.size() == 2 && p.sample == -1 && p.samples["drums"] == 0, "Delete: образцы");
-        check (p.markers.size() == 1 && p.markers[0].label == "Chorus" && std::abs (p.markers[0].from - 0) < 1e-9 && std::abs (p.markers[0].to - 10) < 1e-9, "Delete: маркеры");
+        h.push (p); p.remove (0);
+        check (p.pieces.size() == 2 && p.sample == -1 && p.samples["drums"] == 0 && p.parts.size() == 1, "Delete: образцы и метки");
         juce::String e; Project q; q.fromVar (p.toVar(), e);
-        check (q.pieces[0].off.count ("guitar") == 1 && q.versions[0].off.count ("drums") == 1 && q.markers.size() == 1, "сохранение и загрузка");
+        check (q.pieces[0].off.count ("guitar") == 1 && q.versions[0].off.count ("drums") == 1 && q.sections().size() == 1 && q.pieces[0].id == p.pieces[0].id, "сохранение и загрузка");
+        check (h.undo (p) && p.pieces.size() == 3 && p.sample == 0, "Undo: Delete вернул кусок");
+        check (h.undo (p) && p.rolesInSong().size() == 2, "Undo: инструмент вернулся");
+        check (h.redo (p) && p.rolesInSong().size() == 1, "Redo");
+        while (h.undo (p)) {}
+        check (p.pieces.size() == 2 && p.parts.empty() && ! h.canUndo() && h.canRedo(), "Undo до начала");
         out (bad == 0 ? "selftest passed" : "selftest FAILED"); return bad == 0 ? 0 : 4;
     }
     if (cmd == "verify" && argc >= 4)
@@ -177,11 +188,11 @@ int main (int argc, char** argv)
         // песня: вступление из 04A, куплет из 04B, припев из 04C, дальше 04D и конец из 04A (по тактам каждой версии)
         auto bar = [&] (int vi, int b) { const auto& bs = p.versions[(size_t) vi].bars; return bs[(size_t) juce::jlimit (0, (int) bs.size() - 1, b)]; };
         const int plan[][3] = { { 0, 0, 8 }, { 1, 8, 20 }, { 2, 20, 36 }, { 3, 36, 44 }, { 0, 44, 56 } };
-        for (auto& q : plan) p.pieces.push_back ({ p.versions[(size_t) q[0]].id, bar (q[0], q[1]), bar (q[0], q[2]) });
+        for (auto& q : plan) p.pieces.push_back (p.makePiece (p.versions[(size_t) q[0]].id, bar (q[0], q[1]), bar (q[0], q[2])));
         p.sample = 1;                       // образец звука всех ролей — куплет из 04B
-        {   // маркеры на столе (секунды стола = куски друг за другом)
+        {   // метки частей на кусках
             const char* names[] = { "Intro", "Verse", "Chorus", "Bridge", "Outro" };
-            for (int i = 0; i < (int) p.pieces.size(); ++i) p.markers.push_back ({ names[i], p.tableStartOf (i), p.tableStartOf (i) + p.pieces[(size_t) i].length() });
+            for (int i = 0; i < (int) p.pieces.size(); ++i) p.setPart ({ i }, names[i]);
         }
         dst.createDirectory(); p.save (dst.getChildFile ("rigor_arranger.json"));
         juce::var r;

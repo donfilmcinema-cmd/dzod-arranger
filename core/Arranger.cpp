@@ -112,6 +112,12 @@ bool Project::isOn (const Piece& pc, const juce::String& o) const
     return v->off.count (o) == 0 && pc.off.count (o) == 0;
 }
 
+double Project::limitFor (const juce::String& o) const
+{
+    auto it = limits.find (o);
+    return it != limits.end() ? juce::jlimit (0.0, 12.0, it->second) : limitDb;
+}
+
 double Project::tableLength() const { double s = 0; for (auto& p : pieces) s += p.length(); return s; }
 
 double Project::tableStartOf (int i) const
@@ -133,7 +139,7 @@ bool Project::split (int i, double t)
     const double cut = pieces[(size_t) i].from + (t - tableStartOf (i));
     auto a = pieces[(size_t) i];
     if (cut <= a.from + 0.05 || cut >= a.to - 0.05) return false;      // не режем у самого края
-    auto b = a; a.to = cut; b.from = cut;
+    auto b = a; a.to = cut; b.from = cut; b.id = nextId++;      // метка части (part) — у обеих половин
     pieces[(size_t) i] = a;
     pieces.insert (pieces.begin() + i + 1, b);
     for (auto& [r, s] : samples) if (s > i) ++s;
@@ -153,18 +159,9 @@ int Project::splitAll (double t, const std::vector<int>& only)
 void Project::remove (int i)
 {
     if (i < 0 || i >= (int) pieces.size()) return;
-    // маркеры: всё, что правее куска, сдвигается влево на его длину
-    const double s = tableStartOf (i), len = pieces[(size_t) i].length();
-    std::vector<Marker> keep;
-    for (auto m : markers)
-    {
-        if (m.to <= s) { keep.push_back (m); continue; }
-        if (m.from >= s + len) { m.from -= len; m.to -= len; keep.push_back (m); continue; }
-        m.from = juce::jmin (m.from, s); m.to = m.to >= s + len ? m.to - len : s;
-        if (m.to - m.from > 0.05) keep.push_back (m);
-    }
-    markers = keep;
+    const int part = pieces[(size_t) i].part;
     pieces.erase (pieces.begin() + i);
+    if (part != 0) { bool used = false; for (auto& p : pieces) if (p.part == part) used = true; if (! used) parts.erase (part); }
     for (auto it = samples.begin(); it != samples.end();)
     {
         if (it->second == i) it = samples.erase (it);
@@ -186,6 +183,122 @@ void Project::move (int i, int to)
     sample = sample >= 0 ? remap (sample) : -1;
 }
 
+Piece Project::makePiece (const juce::String& version, double from, double to)
+{
+    Piece p; p.version = version; p.from = from; p.to = to; p.id = nextId++;
+    return p;
+}
+
+int Project::indexOf (int id) const
+{
+    for (size_t i = 0; i < pieces.size(); ++i) if (pieces[i].id == id) return (int) i;
+    return -1;
+}
+
+int Project::setPart (const std::vector<int>& idx, const juce::String& label)
+{
+    int part = 0;
+    if (label.isNotEmpty()) { part = 1; while (parts.count (part)) ++part; parts[part] = label; }
+    std::set<int> was;
+    for (int i : idx) if (i >= 0 && i < (int) pieces.size()) { was.insert (pieces[(size_t) i].part); pieces[(size_t) i].part = part; }
+    for (int w : was) { bool used = false; for (auto& p : pieces) if (p.part == w) used = true; if (w != 0 && ! used) parts.erase (w); }
+    return part;
+}
+
+void Project::renamePart (int part, const juce::String& label)
+{
+    if (parts.count (part)) parts[part] = label;
+}
+
+std::vector<Project::Section> Project::sections() const
+{
+    std::vector<Section> r;
+    for (int i = 0; i < (int) pieces.size(); ++i)
+    {
+        const int pt = pieces[(size_t) i].part;
+        if (pt == 0 || ! parts.count (pt)) continue;
+        if (! r.empty() && r.back().lastPiece == i - 1 && pieces[(size_t) i - 1].part == pt) { r.back().lastPiece = i; continue; }
+        r.push_back ({ parts.at (pt), i, i });
+    }
+    return r;
+}
+
+static juce::var offVar (const std::set<juce::String>& s) { juce::Array<juce::var> a; for (auto& r : s) a.add (r); return a; }
+static std::set<juce::String> offSet (const juce::var& a) { std::set<juce::String> s; if (auto* x = a.getArray()) for (auto& r : *x) s.insert (r.toString()); return s; }
+static juce::var mapVar (const std::map<juce::String, double>& m) { auto* o = new juce::DynamicObject(); for (auto& [k, v] : m) o->setProperty (k, v); return juce::var (o); }
+
+juce::var Project::editState() const
+{
+    auto* root = new juce::DynamicObject();
+    root->setProperty ("songBpm", songBpm); root->setProperty ("crossfadeMs", crossfadeMs);
+    root->setProperty ("strength", strength); root->setProperty ("limitDb", limitDb);
+    root->setProperty ("matchEq", matchEq); root->setProperty ("matchLoudness", matchLoudness); root->setProperty ("snapToBars", snapToBars);
+    root->setProperty ("sample", sample); root->setProperty ("nextId", nextId);
+    auto* sm = new juce::DynamicObject(); for (auto& [k, v] : samples) sm->setProperty (k, v);
+    root->setProperty ("samples", juce::var (sm));
+    root->setProperty ("strengths", mapVar (strengths));
+    root->setProperty ("limits", mapVar (limits));
+    auto* pt = new juce::DynamicObject(); for (auto& [k, v] : parts) pt->setProperty (juce::String (k), v);
+    root->setProperty ("parts", juce::var (pt));
+    auto* vo = new juce::DynamicObject(); for (auto& v : versions) vo->setProperty (v.id, offVar (v.off));
+    root->setProperty ("versionOff", juce::var (vo));
+    juce::Array<juce::var> ps;
+    for (auto& p : pieces)
+    {
+        auto* o = new juce::DynamicObject(); o->setProperty ("version", p.version); o->setProperty ("from", p.from); o->setProperty ("to", p.to);
+        o->setProperty ("id", p.id); o->setProperty ("part", p.part); o->setProperty ("off", offVar (p.off));
+        ps.add (juce::var (o));
+    }
+    root->setProperty ("pieces", ps);
+    return juce::var (root);
+}
+
+void Project::applyEditState (const juce::var& v)
+{
+    songBpm = num (v["songBpm"]); crossfadeMs = num (v["crossfadeMs"], 10); strength = num (v["strength"], 0.7); limitDb = num (v["limitDb"], 6);
+    matchEq = v["matchEq"].isVoid() || (bool) v["matchEq"]; matchLoudness = v["matchLoudness"].isVoid() || (bool) v["matchLoudness"];
+    snapToBars = v["snapToBars"].isVoid() || (bool) v["snapToBars"];
+    sample = (int) num (v["sample"], -1); nextId = (int) num (v["nextId"], 1);
+    samples.clear(); strengths.clear(); limits.clear(); parts.clear(); pieces.clear();
+    if (auto* sm = v["samples"].getDynamicObject()) for (auto& p : sm->getProperties()) samples[p.name.toString()] = (int) p.value;
+    if (auto* sg = v["strengths"].getDynamicObject()) for (auto& p : sg->getProperties()) strengths[p.name.toString()] = (double) p.value;
+    if (auto* sg = v["limits"].getDynamicObject()) for (auto& p : sg->getProperties()) limits[p.name.toString()] = (double) p.value;
+    if (auto* pt = v["parts"].getDynamicObject()) for (auto& p : pt->getProperties()) parts[p.name.toString().getIntValue()] = p.value.toString();
+    if (auto* vo = v["versionOff"].getDynamicObject()) for (auto& ver : versions) ver.off = offSet (vo->getProperty (ver.id));
+    if (auto* ps = v["pieces"].getArray())
+        for (auto& x : *ps)
+        {
+            Piece pc; pc.version = x["version"].toString(); pc.from = num (x["from"]); pc.to = num (x["to"]);
+            pc.id = (int) num (x["id"]); pc.part = (int) num (x["part"]); pc.off = offSet (x["off"]);
+            if (pc.id <= 0) pc.id = nextId++;
+            nextId = juce::jmax (nextId, pc.id + 1);
+            pieces.push_back (pc);
+        }
+}
+
+void History::push (const Project& p)
+{
+    back.push_back (juce::JSON::toString (p.editState(), true));
+    if (back.size() > limit) back.erase (back.begin());
+    fwd.clear();
+}
+
+bool History::undo (Project& p)
+{
+    if (back.empty()) return false;
+    fwd.push_back (juce::JSON::toString (p.editState(), true));
+    p.applyEditState (juce::JSON::parse (back.back())); back.pop_back();
+    return true;
+}
+
+bool History::redo (Project& p)
+{
+    if (fwd.empty()) return false;
+    back.push_back (juce::JSON::toString (p.editState(), true));
+    p.applyEditState (juce::JSON::parse (fwd.back())); fwd.pop_back();
+    return true;
+}
+
 juce::StringArray Project::rolesInSong() const
 {
     juce::StringArray r;
@@ -202,61 +315,29 @@ int Project::sampleFor (const juce::String& o) const
 
 juce::var Project::toVar() const
 {
-    auto* root = new juce::DynamicObject();
-    root->setProperty ("format", 1);
-    root->setProperty ("app", "DZOD Arranger");
-    root->setProperty ("songBpm", songBpm);
-    root->setProperty ("crossfadeMs", crossfadeMs);
-    root->setProperty ("strength", strength);
-    root->setProperty ("limitDb", limitDb);
-    root->setProperty ("matchEq", matchEq);
-    root->setProperty ("matchLoudness", matchLoudness);
-    root->setProperty ("sample", sample);
-    root->setProperty ("snapToBars", snapToBars);
-    auto* sm = new juce::DynamicObject(); for (auto& [k, v] : samples) sm->setProperty (k, v);
-    root->setProperty ("samples", juce::var (sm));
-    auto* sg = new juce::DynamicObject(); for (auto& [k, v] : strengths) sg->setProperty (k, v);
-    root->setProperty ("strengths", juce::var (sg));
-    juce::Array<juce::var> ms;
-    for (auto& m : markers) { auto* o = new juce::DynamicObject(); o->setProperty ("label", m.label); o->setProperty ("from", m.from); o->setProperty ("to", m.to); ms.add (juce::var (o)); }
-    root->setProperty ("markers", ms);
+    auto root = editState();
+    auto* o = root.getDynamicObject();
+    o->setProperty ("format", 2);
+    o->setProperty ("app", "DZOD Arranger");
     juce::Array<juce::var> vs;
     for (auto& v : versions)
     {
-        auto* o = new juce::DynamicObject();
-        o->setProperty ("id", v.id); o->setProperty ("folder", v.folder.getFullPathName());
+        auto* vo = new juce::DynamicObject();
+        vo->setProperty ("id", v.id); vo->setProperty ("folder", v.folder.getFullPathName());
         juce::Array<juce::var> st;
         for (auto& s : v.stems) { auto* so = new juce::DynamicObject(); so->setProperty ("file", s.file.getFullPathName()); so->setProperty ("role", s.role); st.add (juce::var (so)); }
-        o->setProperty ("stems", st);
-        juce::Array<juce::var> off; for (auto& r : v.off) off.add (r);
-        o->setProperty ("off", off);
-        vs.add (juce::var (o));
+        vo->setProperty ("stems", st);
+        vo->setProperty ("off", offVar (v.off));
+        vs.add (juce::var (vo));
     }
-    root->setProperty ("versions", vs);
-    juce::Array<juce::var> ps;
-    for (auto& p : pieces)
-    {
-        auto* o = new juce::DynamicObject(); o->setProperty ("version", p.version); o->setProperty ("from", p.from); o->setProperty ("to", p.to);
-        juce::Array<juce::var> off; for (auto& r : p.off) off.add (r);
-        o->setProperty ("off", off);
-        ps.add (juce::var (o));
-    }
-    root->setProperty ("pieces", ps);
-    return juce::var (root);
+    o->setProperty ("versions", vs);
+    return root;
 }
 
 bool Project::fromVar (const juce::var& v, juce::String& error)
 {
     if (! v.isObject() || v["versions"].getArray() == nullptr) { error = ru ("Это не проект DZOD Arranger"); return false; }
     *this = Project();
-    songBpm = num (v["songBpm"]); crossfadeMs = num (v["crossfadeMs"], 10); strength = num (v["strength"], 0.7); limitDb = num (v["limitDb"], 6);
-    matchEq = v["matchEq"].isVoid() || (bool) v["matchEq"]; matchLoudness = v["matchLoudness"].isVoid() || (bool) v["matchLoudness"];
-    sample = (int) num (v["sample"], -1);
-    snapToBars = v["snapToBars"].isVoid() || (bool) v["snapToBars"];
-    if (auto* sm = v["samples"].getDynamicObject()) for (auto& p : sm->getProperties()) samples[p.name.toString()] = (int) p.value;
-    if (auto* sg = v["strengths"].getDynamicObject()) for (auto& p : sg->getProperties()) strengths[p.name.toString()] = (double) p.value;
-    if (auto* ms = v["markers"].getArray()) for (auto& m : *ms) markers.push_back ({ m["label"].toString(), num (m["from"]), num (m["to"]) });
-    auto offSet = [] (const juce::var& a) { std::set<juce::String> s; if (auto* x = a.getArray()) for (auto& r : *x) s.insert (r.toString()); return s; };
     for (auto& x : *v["versions"].getArray())
     {
         Version ver; ver.id = x["id"].toString(); ver.folder = juce::File (x["folder"].toString());
@@ -266,8 +347,9 @@ bool Project::fromVar (const juce::var& v, juce::String& error)
         ver.off = offSet (x["off"]);
         versions.push_back (ver);
     }
-    if (auto* ps = v["pieces"].getArray())
-        for (auto& x : *ps) { Piece pc; pc.version = x["version"].toString(); pc.from = num (x["from"]); pc.to = num (x["to"]); pc.off = offSet (x["off"]); pieces.push_back (pc); }
+    const auto vo = v["versionOff"];
+    applyEditState (v);
+    if (vo.isVoid()) for (size_t i = 0; i < versions.size(); ++i) versions[i].off = offSet ((*v["versions"].getArray())[(int) i]["off"]);
     return true;
 }
 
@@ -320,7 +402,7 @@ bool Engine::analyseVersion (Version& v, const juce::File& cacheDir, Progress pr
     int n = 0; for (auto& b : bufs) n = juce::jmax (n, b.getNumSamples());
     v.lengthSec = n / sr;
 
-    const auto cache = cacheDir.getChildFile (v.id + "_dzod_stemmer.json");
+    const auto cache = cacheDir.getChildFile (v.id + "_dzod_stemmer_v2.json");
     Stemmer st;
     if (! (cache.existsAsFile() && st.readAnalysis (cache)))
     {
@@ -334,7 +416,7 @@ bool Engine::analyseVersion (Version& v, const juce::File& cacheDir, Progress pr
             if (w == nullptr) { error = ru ("Не удалось записать временный файл"); return false; }
             w->writeFromAudioSampleBuffer (sum, 0, sum.getNumSamples());
         }
-        stemmer::Job job; job.drums = drums; job.full = tmp; job.projectBpm = 0;
+        stemmer::Job job; job.drums = drums; job.full = tmp; job.projectBpm = 0; job.straightenGrid = true;   // сетка без местных «вилок» в сбивках (drummer, 26.10)
         juce::Array<stemmer::RoleFile> rf; for (auto& s : v.stems) rf.add ({ s.file, s.role });
         const bool ok = st.analyse (job, nullptr) && st.analyseSections (rf, nullptr);
         tmp.deleteFile();
@@ -361,7 +443,7 @@ double Engine::songBpm (const Project& p)
     return analyseTempo (p).proposed;
 }
 
-TempoProposal Engine::analyseTempo (const Project& p)
+TempoProposal Engine::analyseTempo (const Project& p, double song)
 {
     TempoProposal r;
     std::vector<std::pair<double, double>> w;      // темп, длина
@@ -381,6 +463,8 @@ TempoProposal Engine::analyseTempo (const Project& p)
     const int s = p.sampleFor ("drums");
     if (s >= 0 && s < (int) r.pieceBpm.size()) r.drumsSample = std::round (r.pieceBpm[(size_t) s] * 10.0) / 10.0;
     r.proposed = r.drumsSample > 0 ? r.drumsSample : r.median;
+    const double ref = song > 0 ? song : r.proposed;
+    for (double b : r.pieceBpm) r.deviationPct.push_back (b > 0 && ref > 0 ? 100.0 * (b - ref) / ref : 0.0);
     return r;
 }
 
@@ -400,8 +484,6 @@ bool Engine::mixIntoStems (Project& P, const juce::File& cacheDir, const juce::F
     struct Placed { Piece pc; Version* v = nullptr; double a = 0, b = 0, dur = 0, at = 0, srcBpm = 0, stretchPct = 0; std::function<double (int)> map; Key key; };
     std::vector<Placed> pl;
     std::map<juce::String, std::unique_ptr<Stemmer>> st;
-    std::vector<double> tableStart, rawFrom;       // для перевода маркеров стола в секунды песни
-    for (size_t i = 0; i < P.pieces.size(); ++i) { tableStart.push_back (P.tableStartOf ((int) i)); rawFrom.push_back (P.pieces[i].from); }
     double at = 0;
     for (size_t i = 0; i < P.pieces.size(); ++i)
     {
@@ -497,7 +579,7 @@ bool Engine::mixIntoStems (Project& P, const juce::File& cacheDir, const juce::F
         for (auto& [vid, spec] : useSpec[role])
         {
             Fix fx;
-            if (P.matchEq) fx.curve = eqCurve (spec, refSpec[role], P.strengthFor (role), P.limitDb);
+            if (P.matchEq) fx.curve = eqCurve (spec, refSpec[role], P.strengthFor (role), P.limitFor (role));
             fx.lufs = wholeLufs[role][vid];
             if (P.matchLoudness) fx.gainDb = juce::jlimit (-12.0, 12.0, (refLufs[role] - fx.lufs) * juce::jmin (1.0, P.strengthFor (role) / 0.7));
             fx.any = true;
@@ -621,23 +703,15 @@ bool Engine::mixIntoStems (Project& P, const juce::File& cacheDir, const juce::F
     }
     if (trim < 0) warnings.add (ru ("Сумма стемов громче -1 dBFS — все стемы тише на ") + fmt (-trim) + ru (" дБ"));
 
-    // маркеры стола -> секунды и такты песни
-    auto toSong = [&] (double tsec)
-    {
-        int i = 0; while (i + 1 < (int) pl.size() && tsec >= tableStart[(size_t) i + 1]) ++i;
-        const auto& p = pl[(size_t) i];
-        const double src = rawFrom[(size_t) i] + (tsec - tableStart[(size_t) i]);
-        return juce::jlimit (0.0, total, p.at + (src - p.a) * p.dur / juce::jmax (1e-6, p.b - p.a));
-    };
+    // метки частей -> секунды и такты песни
     juce::Array<juce::var> sectionsVar;
     {
-        auto ms = P.markers; std::sort (ms.begin(), ms.end(), [] (const Marker& a, const Marker& b) { return a.from < b.from; });
         const double barSec = 240.0 / bpm;
-        for (auto& mk : ms)
+        for (auto& sc : P.sections())
         {
             auto* o = new juce::DynamicObject();
-            const double a = toSong (mk.from), b = toSong (mk.to);
-            o->setProperty ("label", mk.label); o->setProperty ("startSec", a); o->setProperty ("endSec", b);
+            const double a = pl[(size_t) sc.firstPiece].at, b = pl[(size_t) sc.lastPiece].at + pl[(size_t) sc.lastPiece].dur;
+            o->setProperty ("label", sc.label); o->setProperty ("startSec", a); o->setProperty ("endSec", b);
             o->setProperty ("startBar", (int) std::lround (a / barSec) + 1); o->setProperty ("endBar", (int) std::lround (b / barSec));
             sectionsVar.add (juce::var (o));
         }
@@ -666,6 +740,7 @@ bool Engine::mixIntoStems (Project& P, const juce::File& cacheDir, const juce::F
         o->setProperty ("srcFrom", pl[i].a); o->setProperty ("srcTo", pl[i].b);
         o->setProperty ("at", pl[i].at); o->setProperty ("dur", pl[i].dur);
         o->setProperty ("bars", juce::roundToInt (pl[i].dur * bpm / 60.0 / 4.0 * 100) / 100.0);
+        o->setProperty ("id", pl[i].pc.id);
         o->setProperty ("srcBpm", pl[i].srcBpm); o->setProperty ("stretchPct", pl[i].stretchPct);
         o->setProperty ("key", pl[i].key.name());
         o->setProperty ("keyConfidence", pl[i].key.confidence);
@@ -675,7 +750,7 @@ bool Engine::mixIntoStems (Project& P, const juce::File& cacheDir, const juce::F
     R->setProperty ("pieces", pr);
     R->setProperty ("sections", sectionsVar);
     {
-        auto tp = analyseTempo (P);
+        auto tp = analyseTempo (P, bpm);
         auto* o = new juce::DynamicObject(); o->setProperty ("median", tp.median); o->setProperty ("drumsSample", tp.drumsSample); o->setProperty ("proposed", tp.proposed);
         R->setProperty ("tempo", juce::var (o));
     }
@@ -684,7 +759,7 @@ bool Engine::mixIntoStems (Project& P, const juce::File& cacheDir, const juce::F
         for (auto& [vid, f] : per)
         {
             auto* o = new juce::DynamicObject();
-            o->setProperty ("role", role); o->setProperty ("version", vid); o->setProperty ("gainDb", f.gainDb); o->setProperty ("strength", P.strengthFor (role));
+            o->setProperty ("role", role); o->setProperty ("version", vid); o->setProperty ("gainDb", f.gainDb); o->setProperty ("strength", P.strengthFor (role)); o->setProperty ("limitDb", P.limitFor (role));
             o->setProperty ("sample", refVersion[role]);
             juce::Array<juce::var> oct; for (double x : octaveTable (f.curve)) oct.add (std::round (x * 10) / 10);
             o->setProperty ("eqOctaves", oct);

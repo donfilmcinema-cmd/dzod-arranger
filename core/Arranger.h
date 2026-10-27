@@ -57,22 +57,17 @@ struct Piece
 {
     juce::String version;             // id версии
     double from = 0, to = 0;          // секунды в исходных файлах версии (нож режет где угодно; ALIGN ставит края на доли)
-    std::set<juce::String> off;       // инструменты, убранные из этого куска (× на стеме)
+    std::set<juce::String> off;       // инструменты, убранные из этого куска (меню правой кнопки на стеме)
+    int id = 0;                       // постоянный номер куска (метки частей, окно)
+    int part = 0;                     // метка части (флажок): номер в Project::parts, 0 — без метки
     double length() const { return to - from; }
-};
-
-// Маркер части песни (Intro, Verse, Pre-chorus, Chorus, Bridge, Solo, Break, Outro или своё имя).
-// from/to — секунды стола до ALIGN (куски друг за другом без пауз); при сведении переводятся в секунды песни.
-struct Marker
-{
-    juce::String label;
-    double from = 0, to = 0;
 };
 
 // Шаг Tempo: темп каждого куска и предложение для песни.
 struct TempoProposal
 {
     std::vector<double> pieceBpm;     // по порядку кусков
+    std::vector<double> deviationPct; // отклонение куска от темпа песни, %: зелёный < 1, жёлтый < 2,5, красный больше
     double median = 0;                // медиана, взвешенная длиной кусков, округлена до 0,1
     double drumsSample = 0;           // темп куска-образца барабанов (0 — образца нет)
     double proposed = 0;              // что ставить в поле BPM: образец барабанов, иначе медиана
@@ -82,9 +77,11 @@ struct Project
 {
     std::vector<Version> versions;
     std::vector<Piece> pieces;                    // по порядку песни
-    std::vector<Marker> markers;                  // полоса маркеров над стемами
+    std::map<int, juce::String> parts;            // метки частей (Intro, Verse, Chorus…): номер -> имя; ставятся на группу кусков
+    int nextId = 1;
     std::map<juce::String, int> samples;          // образец по роли: outRole -> номер куска
     std::map<juce::String, double> strengths;     // сила подгонки по роли (таблица Unify); нет — общая strength
+    std::map<juce::String, double> limits;        // предел кривой по роли, дБ; нет — общий limitDb
     int sample = -1;                              // образец для ролей без своего (-1 — нет)
     double songBpm = 0;                           // 0 — по образцу барабанов
     double crossfadeMs = 10, strength = 0.7, limitDb = 6;
@@ -95,9 +92,12 @@ struct Project
     const Version* findVersion (const juce::String& id) const;
     int sampleFor (const juce::String& outRole) const;
     double strengthFor (const juce::String& outRole) const;
+    double limitFor (const juce::String& outRole) const;
     bool isOn (const Piece&, const juce::String& outRole) const;   // инструмент звучит в куске (есть, не выключен)
 
     // Монтаж (стол до ALIGN: куски друг за другом).
+    Piece makePiece (const juce::String& version, double from, double to);   // новый кусок со своим id
+    int indexOf (int pieceId) const;
     double tableLength() const;
     double tableStartOf (int piece) const;
     int pieceAt (double tableSec) const;                           // -1 — вне кусков
@@ -106,10 +106,34 @@ struct Project
     void remove (int piece);                                      // Delete
     void move (int piece, int newIndex);                          // перетаскивание
     juce::StringArray rolesInSong() const;                        // строки стола: инструменты, что звучат хоть в одном куске
+    // Метка части на группу кусков (едет с кусками, при резке — на обе половины). Пустое имя — снять метку.
+    int setPart (const std::vector<int>& pieceIndices, const juce::String& label);
+    void renamePart (int part, const juce::String& label);
+    struct Section { juce::String label; int firstPiece = 0, lastPiece = 0; };
+    std::vector<Section> sections() const;                        // подряд идущие куски с одной меткой — одна часть
+
+    // Состояние монтажа без анализа (для Undo / Redo): куски, метки, образцы, настройки, выключенные инструменты.
+    juce::var editState() const;
+    void applyEditState (const juce::var&);
     juce::var toVar() const;
     bool fromVar (const juce::var&, juce::String& error);
     bool save (const juce::File&) const;
     bool load (const juce::File&, juce::String& error);
+};
+
+// Undo / Redo монтажа: перед каждым действием окно зовёт push (project).
+class History
+{
+public:
+    void push (const Project&);
+    bool undo (Project&);
+    bool redo (Project&);
+    bool canUndo() const { return ! back.empty(); }
+    bool canRedo() const { return ! fwd.empty(); }
+    void clear() { back.clear(); fwd.clear(); }
+    size_t limit = 200;
+private:
+    std::vector<juce::String> back, fwd;
 };
 
 class Engine
@@ -123,7 +147,8 @@ public:
     // Темп песни: заданный в проекте или темп образца барабанов (по его долям).
     static double songBpm (const Project&);
     // TEMPO ANALYSE: темп каждого куска и предложение.
-    static TempoProposal analyseTempo (const Project&);
+    // songBpm > 0 — отклонения считать от него (после выбора темпа), иначе от предложения.
+    static TempoProposal analyseTempo (const Project&, double songBpm = 0);
     // «Свести в стемы». Пишет WAV по ролям, dzod_stems.json и arranger_report.json в outFolder.
     static bool mixIntoStems (Project&, const juce::File& cacheDir, const juce::File& outFolder, Progress, juce::var& report, juce::String& error);
     // EXPORT SONG: сумма стемов папки (по dzod_stems.json) в один файл. format: "mp3" (320), "wav24", "wav16".
