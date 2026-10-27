@@ -1,0 +1,49 @@
+name: Build DZOD Arranger
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  windows:
+    name: Windows x64 (ядро + DZODArrangerTool)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure
+        run: cmake -S . -B build -A x64
+
+      - name: Build
+        run: cmake --build build --config Release --parallel --target DZODArrangerTool
+
+      - name: Self-test
+        shell: pwsh
+        run: |
+          $exe = Get-ChildItem -Recurse build -Filter DZODArrangerTool.exe | Select-Object -First 1
+          & $exe.FullName selftest
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+
+      - name: Package
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          $exe = Get-ChildItem -Recurse build -Filter DZODArrangerTool.exe | Select-Object -First 1
+          Copy-Item $exe.FullName dist/
+          Copy-Item README_RU.md dist/
+
+      - name: Upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: DZOD-Arranger-Windows
+          path: dist
+          if-no-files-found: error
+          retention-days: 14
+
+  linux:
+    name: Linux (проверка сборки)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build --parallel --target DZODArrangerTool
+      - run: ./build/DZODArrangerTool selftest
