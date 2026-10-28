@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cmath>
 #include <set>
+#include <thread>
 
 namespace dzod
 {
@@ -32,6 +33,20 @@ bool harmonicRole (const juce::String& r)
 juce::var arr (const std::vector<double>& v) { juce::Array<juce::var> a; for (double x : v) a.add (x); return a; }
 double num (const juce::var& v, double d = 0) { return v.isVoid() ? d : (double) v; }
 juce::String fmt (double v, int d = 1) { return juce::String (v, d); }
+
+bool isCancelled (const std::atomic<bool>* c) { return c != nullptr && c->load(); }
+
+// n задач на все ядра (растяжка стемов): каждая задача — свой индекс
+void parallelFor (size_t n, const std::function<void (size_t)>& f)
+{
+    const size_t threads = juce::jlimit ((size_t) 1, (size_t) 8, (size_t) juce::jmax (1u, std::thread::hardware_concurrency()));
+    if (n <= 1 || threads == 1) { for (size_t i = 0; i < n; ++i) f (i); return; }
+    std::atomic<size_t> next { 0 };
+    std::vector<std::thread> pool;
+    for (size_t k = 0; k < juce::jmin (threads, n); ++k)
+        pool.emplace_back ([&] { for (size_t i; (i = next++) < n;) f (i); });
+    for (auto& th : pool) th.join();
+}
 
 // равномощный переход: 0..1 -> вход/выход
 float fadeIn (double t) { t = juce::jlimit (0.0, 1.0, t); return (float) std::sin (t * juce::MathConstants<double>::halfPi); }
@@ -155,6 +170,19 @@ int Project::splitAll (double t, const std::vector<int>& only)
     if (i < 0) return 0;
     if (! only.empty() && std::find (only.begin(), only.end(), i) == only.end()) return 0;
     return split (i, t) ? 1 : 0;
+}
+
+double Project::snapCut (double tt) const
+{
+    const int pi = pieceAt (tt);
+    if (pi < 0) return tt;
+    const auto& pc = pieces[(size_t) pi];
+    const auto* v = findVersion (pc.version);
+    if (v == nullptr) return tt;
+    const auto& g = snapToBars ? (v->bars.empty() ? v->grid : v->bars) : v->grid;
+    if (g.empty()) return tt;
+    const double start = tableStartOf (pi);
+    return start + (snapTo (g, pc.from + (tt - start)) - pc.from);
 }
 
 void Project::remove (int i)
@@ -417,7 +445,7 @@ std::vector<float> Engine::envelopeOf (const juce::File& f)
     return e;
 }
 
-bool Engine::analyseVersion (Version& v, const juce::File& cacheDir, Progress progress, juce::String& error)
+bool Engine::analyseVersion (Version& v, const juce::File& cacheDir, Progress progress, juce::String& error, const std::atomic<bool>* cancel)
 {
     auto say = [&] (float f, const juce::String& m) { if (progress) progress (f, m); };
     cacheDir.createDirectory();
@@ -486,6 +514,7 @@ bool Engine::analyseVersion (Version& v, const juce::File& cacheDir, Progress pr
         if (! ok) { error = st.lastError(); return false; }
         st.writeAnalysis (cache, st.analysis().autoShift, 0, "DZOD Arranger");
     }
+    if (isCancelled (cancel)) { error = ru ("Отменено"); return false; }
     const auto& A = st.analysis();
     v.analysisFile = cache;
     v.grid = A.grid; v.bars = A.bars; v.sections = A.sections;
@@ -532,12 +561,12 @@ TempoProposal Engine::analyseTempo (const Project& p, double song)
 }
 
 //==============================================================================
-bool Engine::mixIntoStems (Project& P, const juce::File& cacheDir, const juce::File& outFolder, Progress progress, juce::var& report, juce::String& error)
+bool Engine::mixIntoStems (Project& P, const juce::File& cacheDir, const juce::File& outFolder, Progress progress, juce::var& report, juce::String& error, const std::atomic<bool>* cancel)
 {
     auto say = [&] (float f, const juce::String& m) { if (progress) progress (f, m); };
     if (P.pieces.empty()) { error = ru ("На столе нет кусков"); return false; }
     for (auto& v : P.versions)
-        if (! v.analysed && ! analyseVersion (v, cacheDir, progress, error)) return false;
+        if (! v.analysed && ! analyseVersion (v, cacheDir, progress, error, cancel)) return false;
 
     const double bpm = songBpm (P);
     if (bpm <= 0) { error = ru ("Не задан темп песни и нет образца барабанов"); return false; }
@@ -662,6 +691,7 @@ bool Engine::mixIntoStems (Project& P, const juce::File& cacheDir, const juce::F
     {
         std::vector<size_t> mine; for (size_t i = 0; i < pl.size(); ++i) if (pl[i].v == &v) mine.push_back (i);
         if (mine.empty()) continue;
+        if (isCancelled (cancel)) { error = ru ("Отменено"); return false; }
         say (0.15f + 0.75f * doneVersions / juce::jmax (1, usedVersions), ru ("Растягиваю куски версии ") + v.id + " -> " + fmt (bpm) + " BPM");
         std::vector<juce::AudioBuffer<float>> bufs (v.stems.size());
         int n = 0;
@@ -690,10 +720,15 @@ bool Engine::mixIntoStems (Project& P, const juce::File& cacheDir, const juce::F
             const bool wsola = P.stretcher == "wsola";
             if (wsola && ! Stemmer::planStretch (mono, sr, dur2, map2, plan)) { error = ru ("Растяжка не удалась: ") + v.id; return false; }
             const int want = (int) std::lround (dur2 * sr);
-            for (size_t i = 0; i < v.stems.size(); ++i)
+            // растяжка стемов куска — параллельно (стемы независимы), раскладка в песню — по очереди
+            std::vector<size_t> todo;
+            for (size_t i = 0; i < v.stems.size(); ++i) if (! v.stems[i].silent && P.isOn (p.pc, v.stems[i].outRole)) todo.push_back (i);
+            std::vector<juce::AudioBuffer<float>> segs (v.stems.size());
+            parallelFor (todo.size(), [&] (size_t k)
             {
+                const size_t i = todo[k];
                 const auto& s = v.stems[i];
-                if (s.silent || ! P.isOn (p.pc, s.outRole)) continue;
+                if (isCancelled (cancel)) return;
                 auto seg = wsola ? Stemmer::applyStretch (bufs[i], plan)
                                  : stretchByMap (bufs[i], sr, map2, handle, want, s.outRole == "drums");
                 if (seg.getNumChannels() == 1) { seg.setSize (2, seg.getNumSamples(), true); seg.copyFrom (1, 0, seg, 0, 0, seg.getNumSamples()); }
@@ -709,6 +744,13 @@ bool Engine::mixIntoStems (Project& P, const juce::File& cacheDir, const juce::F
                         seg.applyGain ((float) std::pow (10.0, f2->second.gainDb / 20.0));
                     }
                 }
+                segs[i] = std::move (seg);
+            });
+            if (isCancelled (cancel)) { error = ru ("Отменено"); return false; }
+            for (size_t i : todo)
+            {
+                const auto& s = v.stems[i];
+                const auto& seg = segs[i];
                 // место: начало куска на выходе = p.at; в seg запас handle (в отсчётах источника) до начала
                 const juce::int64 lead = (juce::int64) std::lround ((double) handle / sr * kOutRate);
                 const juce::int64 start = (juce::int64) std::lround (p.at * kOutRate);
@@ -841,6 +883,27 @@ bool Engine::mixIntoStems (Project& P, const juce::File& cacheDir, const juce::F
     say (1.0f, ru ("Готово"));
     return true;
 }
+//==============================================================================
+std::vector<Engine::PlayItem> Engine::playPlan (const Project& P, bool equal)
+{
+    std::vector<PlayItem> r;
+    double ref = 0; bool any = false;
+    for (auto& pc : P.pieces) if (auto* v = P.findVersion (pc.version)) if (v->analysed) { ref = any ? juce::jmin (ref, v->mixLufs) : v->mixLufs; any = true; }
+    double at = 0;
+    for (int i = 0; i < (int) P.pieces.size(); ++i)
+    {
+        const auto& pc = P.pieces[(size_t) i];
+        PlayItem it; it.piece = i; it.at = at; it.length = pc.length(); it.src = pc.from;
+        if (auto* v = P.findVersion (pc.version))
+        {
+            for (auto& s : v->stems) if (! s.silent && P.isOn (pc, s.outRole)) it.files.push_back (s.file);
+            if (equal && any && v->analysed) it.gain = (float) juce::Decibels::decibelsToGain (ref - v->mixLufs);
+        }
+        r.push_back (it); at += pc.length();
+    }
+    return r;
+}
+
 //==============================================================================
 static bool readStemsList (const juce::File& folder, juce::Array<juce::File>& files, juce::StringArray& roles, juce::String& error)
 {

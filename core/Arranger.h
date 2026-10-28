@@ -7,6 +7,7 @@
 //      на роль — один WAV 48 кГц 24 бит (Neuro Drums, Neuro Bass, …) + dzod_stems.json + отчёт arranger_report.json.
 #include "Match.h"
 #include "../third_party/stemmer/DzodStemmer.h"
+#include <atomic>
 #include <functional>
 #include <map>
 #include <memory>
@@ -107,6 +108,8 @@ struct Project
     int pieceAt (double tableSec) const;                           // -1 — вне кусков
     bool split (int piece, double tableSec);                      // нож / S по курсору: кусок -> два
     int splitAll (double tableSec, const std::vector<int>& only = {});   // S: выделенные (или все под курсором)
+    // Нож на сильной доле: время стола -> ближайший такт версии под ним (snapToBars = false — ближайшая доля).
+    double snapCut (double tableSec) const;
     void remove (int piece);                                      // Delete
     void move (int piece, int newIndex);                          // перетаскивание
     juce::StringArray rolesInSong() const;                        // строки стола: инструменты, что звучат хоть в одном куске
@@ -152,14 +155,21 @@ public:
     static std::vector<float> envelopeOf (const juce::File&);
     // Анализ версии: темп без подсказки, доли, сильные доли, части (Stemmer core), тональность и громкость стемов.
     // Результат Stemmer кэшируется в cacheDir/<id>_dzod_stemmer.json; повторный вызов читает кэш.
-    static bool analyseVersion (Version&, const juce::File& cacheDir, Progress, juce::String& error);
+    // cancel (необязательно): окно ставит true — операция прерывается с ошибкой «Отменено».
+    static bool analyseVersion (Version&, const juce::File& cacheDir, Progress, juce::String& error, const std::atomic<bool>* cancel = nullptr);
     // Темп песни: заданный в проекте или темп образца барабанов (по его долям).
     static double songBpm (const Project&);
     // TEMPO ANALYSE: темп каждого куска и предложение.
     // songBpm > 0 — отклонения считать от него (после выбора темпа), иначе от предложения.
     static TempoProposal analyseTempo (const Project&, double songBpm = 0);
     // «Свести в стемы». Пишет WAV по ролям, dzod_stems.json и arranger_report.json в outFolder.
-    static bool mixIntoStems (Project&, const juce::File& cacheDir, const juce::File& outFolder, Progress, juce::var& report, juce::String& error);
+    // Растяжка стемов идёт на всех ядрах (до 8 потоков).
+    static bool mixIntoStems (Project&, const juce::File& cacheDir, const juce::File& outFolder, Progress, juce::var& report, juce::String& error,
+                              const std::atomic<bool>* cancel = nullptr);
+    // План прослушивания стола (куски друг за другом): звучащие стемы куска, место, громкость.
+    // equalLoudness — «Сравнить»: каждый кусок на громкости самой тихой версии стола (без подъёма — без перегруза).
+    struct PlayItem { int piece = 0; double at = 0, length = 0, src = 0; std::vector<juce::File> files; float gain = 1.0f; };
+    static std::vector<PlayItem> playPlan (const Project&, bool equalLoudness);
     // EXPORT SONG: сумма стемов папки (по dzod_stems.json) в один файл. format: "mp3" (320), "wav24", "wav16".
     static bool exportSong (const juce::File& stemsFolder, const juce::File& target, const juce::String& format, juce::String& error);
     // SAVE NEW STEMS: копии стемов по шаблону имени, {song} и {instrument} (например «{song}/Stems/{song} — Neuro {instrument}.wav»).

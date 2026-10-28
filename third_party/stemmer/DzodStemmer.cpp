@@ -1016,7 +1016,11 @@ juce::var num (double v)            // строкой: кратчайшая за
 double numOf (const juce::var& v)
 {
     if (! v.isString()) return (double) v;
+#if defined (_LIBCPP_VERSION) && defined (__MINGW32__)
+    return v.toString().getDoubleValue();     // libc++ llvm-mingw: нет std::from_chars(double) (правка studio 28.10)
+#else
     const auto t = v.toString().toStdString(); double x = 0; std::from_chars (t.data(), t.data() + t.size(), x); return x;
+#endif
 }
 }
 

@@ -648,16 +648,10 @@ void ArrangerComponent::playFrom (double sec)
     }
     else
     {
-        // «Сравнить»: каждый кусок на громкости самой тихой версии стола (без подъёма — без перегруза)
-        double ref = 0; bool any = false;
-        for (auto& pc : P.pieces) if (auto* v = P.findVersion (pc.version)) if (v->analysed) { ref = any ? juce::jmin (ref, v->mixLufs) : v->mixLufs; any = true; }
-        double at = 0;
-        for (auto& pc : P.pieces)
+        for (auto& it : Engine::playPlan (P, compare))
         {
-            PlaySegment s; s.at = at; s.length = pc.length(); s.src = pc.from;
-            for (auto& f : stemsOf (pc)) s.files.push_back (f);
-            if (compare && any) if (auto* v = P.findVersion (pc.version)) if (v->analysed) s.gain = (float) juce::Decibels::decibelsToGain (ref - v->mixLufs);
-            segs.push_back (s); at += pc.length();
+            PlaySegment s; s.at = it.at; s.length = it.length; s.src = it.src; s.files = it.files; s.gain = it.gain;
+            segs.push_back (s);
         }
     }
     player.setSegments (std::move (segs));
@@ -673,13 +667,7 @@ void ArrangerComponent::togglePlay()
 
 double ArrangerComponent::snapTable (double tt) const
 {
-    const int pi = P.pieceAt (tt);
-    if (pi < 0 || ! snapBars) return tt;
-    const auto& pc = P.pieces[(size_t) pi];
-    const auto* v = P.findVersion (pc.version);
-    if (v == nullptr || v->bars.empty()) return tt;
-    const double start = P.tableStartOf (pi), src = pc.from + (tt - start);
-    return start + (v->snapToBar (src) - pc.from);
+    return snapBars ? P.snapCut (tt) : tt;
 }
 
 void ArrangerComponent::splitAtCursor()
