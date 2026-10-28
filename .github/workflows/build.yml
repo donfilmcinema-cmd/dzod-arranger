@@ -4,6 +4,9 @@ on:
   push:
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   windows:
     name: Windows x64 (ядро + DZODArrangerTool)
@@ -21,8 +24,11 @@ jobs:
         shell: pwsh
         run: |
           $exe = Get-ChildItem -Recurse build -Filter DZODArrangerTool.exe | Select-Object -First 1
-          & $exe.FullName selftest
-          if ($LASTEXITCODE -ne 0) { exit 1 }
+          & $exe.FullName selftest *> selftest.txt
+          $code = $LASTEXITCODE
+          Get-Content selftest.txt
+          "exit $code" | Add-Content selftest.txt
+          if ($code -ne 0) { exit 1 }
 
       - name: Package
         shell: pwsh
@@ -31,6 +37,20 @@ jobs:
           $exe = Get-ChildItem -Recurse build -Filter DZODArrangerTool.exe | Select-Object -First 1
           Copy-Item $exe.FullName dist/
           Copy-Item README_RU.md dist/
+          Copy-Item selftest.txt dist/
+
+      - name: Publish to branch builds (артефакты Actions из чата Claude не скачать — забираем git fetch)
+        if: github.ref == 'refs/heads/main'
+        shell: bash
+        run: |
+          cd dist
+          git init -q -b builds
+          git config user.name "github-actions"
+          git config user.email "github-actions@users.noreply.github.com"
+          echo "commit ${GITHUB_SHA}" > BUILD_INFO.txt
+          echo "run ${GITHUB_RUN_ID}" >> BUILD_INFO.txt
+          git add -A && git commit -qm "Windows build ${GITHUB_SHA::7}"
+          git push -qf "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${GITHUB_REPOSITORY}" builds
 
       - name: Upload
         uses: actions/upload-artifact@v5
