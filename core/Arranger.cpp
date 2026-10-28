@@ -1,5 +1,6 @@
 #include "Arranger.h"
 #include "../third_party/stemmer/Mp3Writer.h"
+#include "Stretch.h"
 #include <algorithm>
 #include <cmath>
 #include <set>
@@ -232,7 +233,7 @@ juce::var Project::editState() const
     auto* root = new juce::DynamicObject();
     root->setProperty ("songBpm", songBpm); root->setProperty ("crossfadeMs", crossfadeMs);
     root->setProperty ("strength", strength); root->setProperty ("limitDb", limitDb);
-    root->setProperty ("matchEq", matchEq); root->setProperty ("matchLoudness", matchLoudness); root->setProperty ("snapToBars", snapToBars);
+    root->setProperty ("matchEq", matchEq); root->setProperty ("matchLoudness", matchLoudness); root->setProperty ("snapToBars", snapToBars); root->setProperty ("stretcher", stretcher);
     root->setProperty ("sample", sample); root->setProperty ("nextId", nextId);
     auto* sm = new juce::DynamicObject(); for (auto& [k, v] : samples) sm->setProperty (k, v);
     root->setProperty ("samples", juce::var (sm));
@@ -258,6 +259,7 @@ void Project::applyEditState (const juce::var& v)
     songBpm = num (v["songBpm"]); crossfadeMs = num (v["crossfadeMs"], 10); strength = num (v["strength"], 0.7); limitDb = num (v["limitDb"], 6);
     matchEq = v["matchEq"].isVoid() || (bool) v["matchEq"]; matchLoudness = v["matchLoudness"].isVoid() || (bool) v["matchLoudness"];
     snapToBars = v["snapToBars"].isVoid() || (bool) v["snapToBars"];
+    stretcher = v["stretcher"].isVoid() ? juce::String ("phase") : v["stretcher"].toString();
     sample = (int) num (v["sample"], -1); nextId = (int) num (v["nextId"], 1);
     samples.clear(); strengths.clear(); limits.clear(); parts.clear(); pieces.clear();
     if (auto* sm = v["samples"].getDynamicObject()) for (auto& p : sm->getProperties()) samples[p.name.toString()] = (int) p.value;
@@ -624,13 +626,15 @@ bool Engine::mixIntoStems (Project& P, const juce::File& cacheDir, const juce::F
             std::function<double (int)> map2 = [base, m0, m1] (int m) { const int q = m - 1; return q < 0 ? m0 + q * (m1 - m0) : base (q); };
             const double dur2 = p.dur + 2.0 * handle / sr;
             Stemmer::StretchPlan plan;
-            if (! Stemmer::planStretch (mono, sr, dur2, map2, plan)) { error = ru ("Растяжка не удалась: ") + v.id; return false; }
+            const bool wsola = P.stretcher == "wsola";
+            if (wsola && ! Stemmer::planStretch (mono, sr, dur2, map2, plan)) { error = ru ("Растяжка не удалась: ") + v.id; return false; }
             const int want = (int) std::lround (dur2 * sr);
             for (size_t i = 0; i < v.stems.size(); ++i)
             {
                 const auto& s = v.stems[i];
                 if (s.silent || ! P.isOn (p.pc, s.outRole)) continue;
-                auto seg = Stemmer::applyStretch (bufs[i], plan);
+                auto seg = wsola ? Stemmer::applyStretch (bufs[i], plan)
+                                 : stretchByMap (bufs[i], sr, map2, handle, want, s.outRole == "drums");
                 if (seg.getNumChannels() == 1) { seg.setSize (2, seg.getNumSamples(), true); seg.copyFrom (1, 0, seg, 0, 0, seg.getNumSamples()); }
                 seg.setSize (2, want, true, true);
                 if (std::abs (sr - kOutRate) > 0.5) seg = Stemmer::resample (seg, sr, kOutRate);

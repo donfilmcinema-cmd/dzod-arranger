@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.22)
-project(DZODArranger VERSION 0.2.1 LANGUAGES C CXX)
+project(DZODArranger VERSION 0.3.0 LANGUAGES C CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -41,9 +41,11 @@ set_target_properties(DZODShine PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
 # ядро Arranger (+ Stemmer core) без окна
 set(ARRANGER_CORE
-  core/Arranger.cpp core/Match.cpp
+  core/Arranger.cpp core/Match.cpp core/Stretch.cpp
   third_party/stemmer/DzodStemmer.cpp third_party/stemmer/Mp3Writer.cpp)
 
 add_executable(ArrangerTool tools/ArrangerTool.cpp ${ARRANGER_CORE})
+# Signalsmith Stretch (MIT) + Signalsmith Linear (MIT) — только заголовки
+target_include_directories(ArrangerTool PRIVATE third_party/signalsmith/stretch/include third_party/signalsmith/linear/include)
 set_target_properties(ArrangerTool PROPERTIES OUTPUT_NAME DZODArrangerTool)
 target_link_libraries(ArrangerTool PRIVATE DZODShine DZODJuceAudio)

@@ -86,7 +86,8 @@ struct Project
     double songBpm = 0;                           // 0 — по образцу барабанов
     double crossfadeMs = 10, strength = 0.7, limitDb = 6;
     bool matchEq = true, matchLoudness = true;
-    bool snapToBars = true;                       // ALIGN: края кусков на сильные доли (false — на ближайшие доли)
+    bool snapToBars = true;
+    juce::String stretcher = "phase";             // "phase" — фазовый вокодер Signalsmith (по умолчанию), "wsola" — старая растяжка Stemmer (сравнение)                       // ALIGN: края кусков на сильные доли (false — на ближайшие доли)
 
     Version* findVersion (const juce::String& id);
     const Version* findVersion (const juce::String& id) const;

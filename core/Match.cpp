@@ -257,7 +257,10 @@ bool Key::compatibleWith (const Key& o) const
     if (tonic == o.tonic) return true;
     const int rel = minor ? (tonic + 3) % 12 : (tonic + 9) % 12;
     if (o.minor != minor && o.tonic == rel) return true;
-    return similarity (o) > 0.8f;
+    // RIGOR 04B -> 04C: детектор назвал F major / C# major (сходство нот 0,27), автор на слух — тональность одна (28.10).
+    // Куски одной песни делят ноты, даже когда профили «врут»; тревога — только если наборы нот почти не совпадают.
+    if (confidence < 0.5f || o.confidence < 0.5f) return true;
+    return similarity (o) > 0.0f;
 }
 
 Key detectKey (const std::vector<const juce::AudioBuffer<float>*>& harm, double sr, double fromSec, double toSec)

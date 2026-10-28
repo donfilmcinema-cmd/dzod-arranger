@@ -169,6 +169,26 @@ int main (int argc, char** argv)
         check (p.pieces.size() == 2 && p.parts.empty() && ! h.canUndo() && h.canRedo(), "Undo до начала");
         out (bad == 0 ? "selftest passed" : "selftest FAILED"); return bad == 0 ? 0 : 4;
     }
+    if (cmd == "eqtest")
+    {   // чистота эквалайзера подгонки: синусы через кривую ±4 дБ — остаток после вычитания идеального синуса
+        const double sr = 48000; const int n = (int) (sr * 3);
+        Spectrum curve {}; for (int k = 0; k < kGrid; ++k) curve[(size_t) k] = 4.0 * std::sin (k * 0.37) * std::sin (k * 0.11);
+        for (double f : { 60.0, 440.0, 1000.0, 3150.0, 9000.0 })
+        {
+            juce::AudioBuffer<float> b (1, n);
+            for (int i = 0; i < n; ++i) b.setSample (0, i, (float) (0.5 * std::sin (2 * juce::MathConstants<double>::pi * f * i / sr)));
+            applyEq (b, sr, curve);
+            // МНК-синус на средней части
+            double ss = 0, sc = 0, cc = 0, xs = 0, xc = 0; const int a0 = n / 4, a1 = 3 * n / 4;
+            for (int i = a0; i < a1; ++i) { const double ph = 2 * juce::MathConstants<double>::pi * f * i / sr, s = std::sin (ph), c = std::cos (ph), x = b.getSample (0, i);
+                ss += s * s; cc += c * c; sc += s * c; xs += x * s; xc += x * c; }
+            const double det = ss * cc - sc * sc, A = (xs * cc - xc * sc) / det, B = (xc * ss - xs * sc) / det;
+            double e = 0, p = 0;
+            for (int i = a0; i < a1; ++i) { const double ph = 2 * juce::MathConstants<double>::pi * f * i / sr, y = A * std::sin (ph) + B * std::cos (ph), x = b.getSample (0, i); e += (x - y) * (x - y); p += y * y; }
+            out ("  " + juce::String (f, 0) + " Hz: gain " + juce::String (20 * std::log10 (std::sqrt (A * A + B * B) / 0.5), 2) + " dB, residual " + juce::String (10 * std::log10 (e / p + 1e-30), 1) + " dB");
+        }
+        return 0;
+    }
     if (cmd == "verify" && argc >= 4)
     {
         juce::StringArray seams; if (argc >= 5) seams.addTokens (argv[4], ",", "");

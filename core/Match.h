@@ -40,7 +40,7 @@ struct Key
     std::array<float, 12> chroma {};   // доли нот C…B (нормированы) — сравнение соседних кусков
     juce::String name() const;              // «A minor», «C major», «—»
     // те же ноты: та же тоника (мажор/минор у квинтовых аккордов не различить), относительная тональность или похожий набор нот
-    bool compatibleWith (const Key&) const;
+    bool compatibleWith (const Key&) const;   // тревога только при сходстве нот <= 0 (оба уверены)
     float similarity (const Key&) const;    // корреляция хромы, -1..1
 };
 // Тональность по гармоническим стемам (суммируются). [from, to) — секунды, to < 0 — до конца.
