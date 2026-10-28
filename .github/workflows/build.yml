@@ -58,7 +58,7 @@ jobs:
           name: DZOD-Arranger-Windows
           path: dist
           if-no-files-found: error
-          retention-days: 14
+          retention-days: 1
 
   linux:
     name: Linux (проверка сборки)
