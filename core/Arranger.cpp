@@ -374,7 +374,47 @@ Version Engine::scanVersion (const juce::File& folder)
         VersionStem s; s.file = f; s.role = Stemmer::roleFromFileName (f.getFileName()); s.outRole = outRoleOf (s.role);
         v.stems.push_back (s);
     }
+    v.title = folder.getFileName();
     return v;
+}
+
+bool Engine::isAudioFile (const juce::File& f)
+{
+    return f.hasFileExtension ("flac;wav;aif;aiff;mp3");
+}
+
+Version Engine::versionFromFiles (const juce::String& id, const juce::Array<juce::File>& files)
+{
+    Version v; v.id = id;
+    juce::Array<juce::File> fs;
+    for (auto& f : files)
+    {
+        if (f.isDirectory()) { for (auto& c : f.findChildFiles (juce::File::findFiles, false)) if (isAudioFile (c)) fs.add (c); }
+        else if (isAudioFile (f)) fs.add (f);
+    }
+    fs.sort();
+    for (auto& f : fs)
+    {
+        VersionStem s; s.file = f; s.role = Stemmer::roleFromFileName (f.getFileName()); s.outRole = outRoleOf (s.role);
+        v.stems.push_back (s);
+    }
+    if (! fs.isEmpty()) { v.folder = fs[0].getParentDirectory(); v.title = v.folder.getFileName(); }
+    return v;
+}
+
+std::vector<float> Engine::envelopeOf (const juce::File& f)
+{
+    std::vector<float> e;
+    juce::AudioBuffer<float> b; double sr = 0; juce::String err;
+    if (! Stemmer::loadAudio (f, b, sr, err) || sr <= 0) return e;
+    const int hop = juce::jmax (1, (int) (sr / 100));
+    for (int i = 0; i < b.getNumSamples(); i += hop)
+    {
+        float m = 0; const int n = juce::jmin (hop, b.getNumSamples() - i);
+        for (int c = 0; c < b.getNumChannels(); ++c) m = juce::jmax (m, b.getMagnitude (c, i, n));
+        e.push_back (m);
+    }
+    return e;
 }
 
 bool Engine::analyseVersion (Version& v, const juce::File& cacheDir, Progress progress, juce::String& error)
@@ -383,7 +423,8 @@ bool Engine::analyseVersion (Version& v, const juce::File& cacheDir, Progress pr
     cacheDir.createDirectory();
     juce::File drums;
     for (auto& s : v.stems) if (s.role == "drums") drums = s.file;
-    if (drums == juce::File()) { error = ru ("В версии «") + v.id + ru ("» нет стема барабанов (Drums) — темп определить не по чему"); return false; }
+    const bool noDrums = drums == juce::File();      // нет стема барабанов (полный микс) — темп ищем по сумме всех стемов
+    if (v.stems.empty()) { error = ru ("В версии «") + v.id + ru ("» нет звуковых файлов"); return false; }
 
     // все стемы: громкость, сумма для анализа, гармонические — для тональности
     say (0.02f, ru ("Читаю стемы: ") + v.id);
@@ -403,8 +444,28 @@ bool Engine::analyseVersion (Version& v, const juce::File& cacheDir, Progress pr
     v.sampleRate = sr;
     int n = 0; for (auto& b : bufs) n = juce::jmax (n, b.getNumSamples());
     v.lengthSec = n / sr;
+    {   // огибающие строк стола и громкость всей версии
+        v.env.clear();
+        const int hop = juce::jmax (1, (int) (sr / 100)), frames = n / hop + 1;
+        juce::AudioBuffer<float> mix (2, n); mix.clear();
+        for (size_t i = 0; i < v.stems.size(); ++i)
+        {
+            auto& e = v.env[v.stems[i].outRole]; if (e.empty()) e.assign ((size_t) frames, 0.0f);
+            const auto& b = bufs[i];
+            for (int f = 0; f < frames; ++f)
+            {
+                const int s0 = f * hop, len = juce::jmin (hop, b.getNumSamples() - s0); if (len <= 0) break;
+                float m = 0; for (int c = 0; c < b.getNumChannels(); ++c) m = juce::jmax (m, b.getMagnitude (c, s0, len));
+                e[(size_t) f] = juce::jmax (e[(size_t) f], m);
+            }
+            for (int c = 0; c < 2; ++c) mix.addFrom (c, 0, b, juce::jmin (c, b.getNumChannels() - 1), 0, b.getNumSamples());
+        }
+        v.mixLufs = lufs (mix, sr);
+    }
 
-    const auto cache = cacheDir.getChildFile (v.id + "_dzod_stemmer_v2.json");
+    // ключ кэша — файлы и роли (одинаковые id «V1» у разных песен не путаются)
+    juce::String key; for (auto& s : v.stems) key << s.file.getFullPathName() << "|" << s.file.getSize() << "|" << s.file.getLastModificationTime().toMilliseconds() << "|" << s.role << ";";
+    const auto cache = cacheDir.getChildFile (juce::File::createLegalFileName (v.id) + "_" + juce::String::toHexString (key.hashCode64()) + "_dzod_stemmer_v2.json");
     Stemmer st;
     if (! (cache.existsAsFile() && st.readAnalysis (cache)))
     {
@@ -418,7 +479,7 @@ bool Engine::analyseVersion (Version& v, const juce::File& cacheDir, Progress pr
             if (w == nullptr) { error = ru ("Не удалось записать временный файл"); return false; }
             w->writeFromAudioSampleBuffer (sum, 0, sum.getNumSamples());
         }
-        stemmer::Job job; job.drums = drums; job.full = tmp; job.projectBpm = 0; job.straightenGrid = true;   // сетка без местных «вилок» в сбивках (drummer, 26.10)
+        stemmer::Job job; job.drums = noDrums ? tmp : drums; job.full = tmp; job.projectBpm = 0; job.straightenGrid = true;   // сетка без местных «вилок» в сбивках (drummer, 26.10)
         juce::Array<stemmer::RoleFile> rf; for (auto& s : v.stems) rf.add ({ s.file, s.role });
         const bool ok = st.analyse (job, nullptr) && st.analyseSections (rf, nullptr);
         tmp.deleteFile();

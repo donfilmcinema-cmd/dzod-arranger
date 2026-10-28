@@ -45,6 +45,9 @@ struct Version
     std::vector<double> grid, bars;   // доли и сильные доли, с
     std::vector<dzod::stemmer::Section> sections;
     Key key;
+    double mixLufs = -70;             // громкость всей версии (сумма стемов) — «Сравнить» на равной громкости
+    std::map<juce::String, std::vector<float>> env;   // огибающая по строкам стола, 100 точек в секунду (для волн в окне)
+    juce::String title;               // подпись варианта (например «Suno v4 · take 1»)
     bool analysed = false;
     std::set<juce::String> off;       // инструменты варианта, выключенные во всех его кусках (плитка в левой колонке)
 
@@ -142,6 +145,11 @@ class Engine
 public:
     // Стемы папки версии с ролями по имени файла (без анализа).
     static Version scanVersion (const juce::File& folder);
+    // Версия из выбранных файлов (кнопка LOAD FILES…): роли по имени файла, .mid и прочее пропускается.
+    static Version versionFromFiles (const juce::String& id, const juce::Array<juce::File>& files);
+    static bool isAudioFile (const juce::File&);
+    // Огибающая WAV-файлов (100 точек в секунду) — для просмотра готовых стемов.
+    static std::vector<float> envelopeOf (const juce::File&);
     // Анализ версии: темп без подсказки, доли, сильные доли, части (Stemmer core), тональность и громкость стемов.
     // Результат Stemmer кэшируется в cacheDir/<id>_dzod_stemmer.json; повторный вызов читает кэш.
     static bool analyseVersion (Version&, const juce::File& cacheDir, Progress, juce::String& error);
