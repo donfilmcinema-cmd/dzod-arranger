@@ -16,11 +16,21 @@ jobs:
 
       - name: Configure
         shell: bash
-        run: cmake -S . -B build -A x64 2>&1 | tee configure.log; exit ${PIPESTATUS[0]}
+        run: |
+          set +e
+          cmake -S . -B build -A x64 > configure.log 2>&1
+          code=$?
+          tail -20 configure.log
+          exit $code
 
       - name: Build
         shell: bash
-        run: cmake --build build --config Release --parallel --target ArrangerApp ArrangerTool 2>&1 | tee build.log | grep -E "error|warning C4(700|715)" | head -200; exit ${PIPESTATUS[0]}
+        run: |
+          set +e
+          cmake --build build --config Release --parallel --target ArrangerApp ArrangerTool > build.log 2>&1
+          code=$?
+          grep -E " error " build.log | head -100
+          exit $code
 
       - name: Self-test
         shell: pwsh
