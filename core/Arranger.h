@@ -119,6 +119,9 @@ struct Project
     struct Section { juce::String label; int firstPiece = 0, lastPiece = 0; };
     std::vector<Section> sections() const;                        // подряд идущие куски с одной меткой — одна часть
 
+    // Пресет «как было» для Unify: образцы, сила и предел по ролям — сброс к умолчанию (образец не выбран, 70 %, ±6 дБ, EQ и громкость вкл.).
+    void resetUnify();
+
     // Состояние монтажа без анализа (для Undo / Redo): куски, метки, образцы, настройки, выключенные инструменты.
     juce::var editState() const;
     void applyEditState (const juce::var&);
@@ -170,6 +173,9 @@ public:
     // equalLoudness — «Сравнить»: каждый кусок на громкости самой тихой версии стола (без подъёма — без перегруза).
     struct PlayItem { int piece = 0; double at = 0, length = 0, src = 0; std::vector<juce::File> files; float gain = 1.0f; };
     static std::vector<PlayItem> playPlan (const Project&, bool equalLoudness);
+    // Спектр для графика Unify: кусок × роль -> нормированный спектр (121 точка, 20 Гц…20 кГц, дБ), первые maxSec секунд куска (0 — весь).
+    // Тот же расчёт, что в подгонке (ltas + normalised). Образец роли — тот же вызов с номером куска-образца.
+    static bool pieceSpectrum (const Project&, int piece, const juce::String& outRole, Spectrum& out, juce::String& error, double maxSec = 40);
     // EXPORT SONG: сумма стемов папки (по dzod_stems.json) в один файл. format: "mp3" (320), "wav24", "wav16".
     static bool exportSong (const juce::File& stemsFolder, const juce::File& target, const juce::String& format, juce::String& error);
     // SAVE NEW STEMS: копии стемов по шаблону имени, {song} и {instrument} (например «{song}/Stems/{song} — Neuro {instrument}.wav»).

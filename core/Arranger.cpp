@@ -445,6 +445,54 @@ std::vector<float> Engine::envelopeOf (const juce::File& f)
     return e;
 }
 
+// Кэш разбора версии без звука: длина, громкость стемов, огибающие (байт на точку), тональность.
+static bool readMeta (Version& v, const juce::File& f)
+{
+    const auto j = juce::JSON::parse (f.loadFileAsString());
+    auto* st = j["stems"].getArray();
+    if (st == nullptr || st->size() != (int) v.stems.size() || (int) j["format"] != 1) return false;
+    v.sampleRate = (double) j["sampleRate"]; v.lengthSec = (double) j["lengthSec"]; v.mixLufs = (double) j["mixLufs"];
+    for (int i = 0; i < st->size(); ++i)
+    {
+        auto& s = v.stems[(size_t) i];
+        s.lufs = (double) (*st)[i]["lufs"]; s.peakDb = (double) (*st)[i]["peakDb"]; s.silent = s.lufs < -55.0;
+    }
+    v.key = {}; v.key.tonic = (int) j["key"]["tonic"]; v.key.minor = (bool) j["key"]["minor"]; v.key.confidence = (float) (double) j["key"]["confidence"];
+    if (auto* c = j["key"]["chroma"].getArray()) for (int k = 0; k < juce::jmin (12, c->size()); ++k) v.key.chroma[(size_t) k] = (float) (double) (*c)[k];
+    v.env.clear();
+    if (auto* e = j["env"].getDynamicObject())
+        for (auto& p : e->getProperties())
+        {
+            juce::MemoryBlock mb; mb.fromBase64Encoding (p.value.toString());
+            auto& out = v.env[p.name.toString()]; out.resize (mb.getSize());
+            const auto* b = static_cast<const juce::uint8*> (mb.getData());
+            for (size_t k = 0; k < mb.getSize(); ++k) { const float x = b[k] / 255.0f; out[k] = x * x; }   // корень при записи — точность тихих мест
+        }
+    return v.sampleRate > 0;
+}
+
+static void writeMeta (const Version& v, const juce::File& f)
+{
+    auto* o = new juce::DynamicObject();
+    o->setProperty ("format", 1); o->setProperty ("sampleRate", v.sampleRate); o->setProperty ("lengthSec", v.lengthSec); o->setProperty ("mixLufs", v.mixLufs);
+    juce::Array<juce::var> st;
+    for (auto& s : v.stems) { auto* so = new juce::DynamicObject(); so->setProperty ("file", s.file.getFileName()); so->setProperty ("lufs", s.lufs); so->setProperty ("peakDb", s.peakDb); st.add (juce::var (so)); }
+    o->setProperty ("stems", st);
+    auto* k = new juce::DynamicObject(); k->setProperty ("tonic", v.key.tonic); k->setProperty ("minor", v.key.minor); k->setProperty ("confidence", v.key.confidence);
+    juce::Array<juce::var> ch; for (float c : v.key.chroma) ch.add (c); k->setProperty ("chroma", ch);
+    o->setProperty ("key", juce::var (k));
+    auto* e = new juce::DynamicObject();
+    for (auto& [role, env] : v.env)
+    {
+        juce::MemoryBlock mb (env.size());
+        auto* b = static_cast<juce::uint8*> (mb.getData());
+        for (size_t i = 0; i < env.size(); ++i) b[i] = (juce::uint8) juce::jlimit (0, 255, (int) std::lround (std::sqrt (juce::jlimit (0.0f, 1.0f, env[i])) * 255.0f));
+        e->setProperty (role, mb.toBase64Encoding());
+    }
+    o->setProperty ("env", juce::var (e));
+    f.replaceWithText (juce::JSON::toString (juce::var (o), true));
+}
+
 bool Engine::analyseVersion (Version& v, const juce::File& cacheDir, Progress progress, juce::String& error, const std::atomic<bool>* cancel)
 {
     auto say = [&] (float f, const juce::String& m) { if (progress) progress (f, m); };
@@ -453,6 +501,26 @@ bool Engine::analyseVersion (Version& v, const juce::File& cacheDir, Progress pr
     for (auto& s : v.stems) if (s.role == "drums") drums = s.file;
     const bool noDrums = drums == juce::File();      // нет стема барабанов (полный микс) — темп ищем по сумме всех стемов
     if (v.stems.empty()) { error = ru ("В версии «") + v.id + ru ("» нет звуковых файлов"); return false; }
+
+    // ключ кэша — файлы и роли (одинаковые id «V1» у разных песен не путаются)
+    juce::String key; for (auto& s : v.stems) key << s.file.getFullPathName() << "|" << s.file.getSize() << "|" << s.file.getLastModificationTime().toMilliseconds() << "|" << s.role << ";";
+    const auto base = juce::File::createLegalFileName (v.id) + "_" + juce::String::toHexString (key.hashCode64());
+    const auto cache = cacheDir.getChildFile (base + "_dzod_stemmer_v2.json");
+    const auto meta = cacheDir.getChildFile (base + "_meta_v1.json");
+    if (cache.existsAsFile() && meta.existsAsFile() && readMeta (v, meta))
+    {   // быстрый путь: версия уже разбиралась — звук не читаем
+        Stemmer st;
+        if (st.readAnalysis (cache))
+        {
+            const auto& A = st.analysis();
+            v.analysisFile = cache;
+            v.grid = A.grid; v.bars = A.bars; v.sections = A.sections;
+            v.bpm = A.tempoEstimate > 0 ? A.tempoEstimate : A.bpmMedian; v.bpmMin = A.bpmMin; v.bpmMax = A.bpmMax;
+            v.analysed = true;
+            say (1.0f, ru ("Готово (из кэша): ") + v.id);
+            return true;
+        }
+    }
 
     // все стемы: громкость, сумма для анализа, гармонические — для тональности
     say (0.02f, ru ("Читаю стемы: ") + v.id);
@@ -491,9 +559,6 @@ bool Engine::analyseVersion (Version& v, const juce::File& cacheDir, Progress pr
         v.mixLufs = lufs (mix, sr);
     }
 
-    // ключ кэша — файлы и роли (одинаковые id «V1» у разных песен не путаются)
-    juce::String key; for (auto& s : v.stems) key << s.file.getFullPathName() << "|" << s.file.getSize() << "|" << s.file.getLastModificationTime().toMilliseconds() << "|" << s.role << ";";
-    const auto cache = cacheDir.getChildFile (juce::File::createLegalFileName (v.id) + "_" + juce::String::toHexString (key.hashCode64()) + "_dzod_stemmer_v2.json");
     Stemmer st;
     if (! (cache.existsAsFile() && st.readAnalysis (cache)))
     {
@@ -525,6 +590,7 @@ bool Engine::analyseVersion (Version& v, const juce::File& cacheDir, Progress pr
     for (size_t i = 0; i < v.stems.size(); ++i) if (harmonicRole (v.stems[i].role) && ! v.stems[i].silent) harm.push_back (&bufs[i]);
     v.key = detectKey (harm, sr);
     v.analysed = true;
+    writeMeta (v, meta);
     say (1.0f, ru ("Готово: ") + v.id);
     return true;
 }
@@ -884,6 +950,39 @@ bool Engine::mixIntoStems (Project& P, const juce::File& cacheDir, const juce::F
     return true;
 }
 //==============================================================================
+void Project::resetUnify()
+{
+    samples.clear(); sample = -1; strengths.clear(); limits.clear();
+    strength = 0.7; limitDb = 6; matchEq = true; matchLoudness = true;
+}
+
+bool Engine::pieceSpectrum (const Project& P, int piece, const juce::String& role, Spectrum& out, juce::String& error, double maxSec)
+{
+    if (piece < 0 || piece >= (int) P.pieces.size()) { error = ru ("Нет такого куска"); return false; }
+    const auto& pc = P.pieces[(size_t) piece];
+    const auto* v = P.findVersion (pc.version);
+    if (v == nullptr) { error = ru ("Нет версии ") + pc.version; return false; }
+    juce::AudioBuffer<float> sum; double sr = 0;
+    const double len = maxSec > 0 ? juce::jmin (pc.length(), maxSec) : pc.length();
+    for (auto& s : v->stems)
+    {
+        if (s.outRole != role || s.silent) continue;
+        std::unique_ptr<juce::AudioFormatReader> r;
+        { juce::AudioFormatManager fm; fm.registerBasicFormats(); r.reset (fm.createReaderFor (s.file)); }
+        if (r == nullptr) { error = ru ("Не читается ") + s.file.getFileName(); return false; }
+        sr = r->sampleRate;
+        const int n = (int) (len * sr);
+        if (sum.getNumSamples() == 0) { sum.setSize (2, n); sum.clear(); }
+        juce::AudioBuffer<float> b (2, n); b.clear();
+        r->read (&b, 0, n, (juce::int64) (pc.from * sr), true, true);
+        if (r->numChannels == 1) b.copyFrom (1, 0, b, 0, 0, n);
+        for (int c = 0; c < 2; ++c) sum.addFrom (c, 0, b, c, 0, juce::jmin (n, sum.getNumSamples()));
+    }
+    if (sum.getNumSamples() == 0) { error = ru ("В куске нет инструмента ") + role; return false; }
+    out = normalised (ltas (sum, sr));
+    return true;
+}
+
 std::vector<Engine::PlayItem> Engine::playPlan (const Project& P, bool equal)
 {
     std::vector<PlayItem> r;
