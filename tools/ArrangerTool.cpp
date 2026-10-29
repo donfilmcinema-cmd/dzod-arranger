@@ -265,6 +265,47 @@ int main (int argc, char** argv)
         }
         return 0;
     }
+    if (cmd == "unifyreport" && argc >= 5)
+    {   // RIGOR: 5 кусков 04A–04D, образец — кусок 2 (04B). Для каждой роли и куска: громкость и спектр против образца до/после Unify.
+        const juce::File root (argv[2]), cache (argv[3]), dst (argv[4]);
+        Project p;
+        for (auto id : { "04A", "04B", "04C", "04D" }) { auto v = Engine::scanVersion (root.getChildFile (id)); if (! Engine::analyseVersion (v, cache, nullptr, err)) { out ("ERROR " + err); return 1; } p.versions.push_back (v); }
+        auto bar = [&] (int vi, int b) { const auto& bs = p.versions[(size_t) vi].bars; return bs[(size_t) juce::jlimit (0, (int) bs.size() - 1, b)]; };
+        const int plan[][3] = { { 0, 0, 8 }, { 1, 8, 20 }, { 2, 20, 36 }, { 3, 36, 44 }, { 0, 44, 56 } };
+        for (auto& q : plan) p.pieces.push_back (p.makePiece (p.versions[(size_t) q[0]].id, bar (q[0], q[1]), bar (q[0], q[2])));
+        p.sample = 1;
+        juce::var rep[2];
+        for (int m = 0; m < 2; ++m)
+        {
+            Project q = p; if (m == 0) { q.matchEq = false; q.matchLoudness = false; }
+            if (! Engine::mixIntoStems (q, cache, dst.getChildFile (m ? "after" : "before"), nullptr, rep[m], err)) { out ("ERROR " + err); return 1; }
+        }
+        out ("| Line | кусок | громкость к образцу, дБ: до → после | отклонение спектра от образца (среднее по 10 октавам), дБ: до → после |");
+        out ("|---|---|---|---|");
+        for (auto role : { "drums", "bass", "guitar", "vocals" })
+        {
+            juce::AudioBuffer<float> b[2]; double sr = 0; juce::String e;
+            for (int m = 0; m < 2; ++m) Stemmer::loadAudio (dst.getChildFile (m ? "after" : "before").getChildFile (neuroName (role) + ".wav"), b[m], sr, e);
+            auto& ps = *rep[0]["pieces"].getArray();
+            auto region = [&] (int i) { return std::make_pair ((juce::int64) ((double) ps[i]["at"] * sr), (juce::int64) (((double) ps[i]["at"] + (double) ps[i]["dur"]) * sr)); };
+            const auto rr = region (1);
+            for (int i = 0; i < ps.size(); ++i)
+            {
+                if (i == 1) continue;
+                const auto r = region (i);
+                double ld[2], sd[2];
+                for (int m = 0; m < 2; ++m)
+                {
+                    ld[m] = lufs (b[m], sr, r.first, r.second) - lufs (b[m], sr, rr.first, rr.second);
+                    const auto oa = octaveTable (normalised (ltas (b[m], sr, r.first, r.second))), ob = octaveTable (normalised (ltas (b[m], sr, rr.first, rr.second)));
+                    double s = 0; for (int k = 1; k < 10; ++k) s += std::abs (oa[(size_t) k] - ob[(size_t) k]); sd[m] = s / 9;
+                }
+                out ("| " + neuroName (role) + " | " + juce::String (i + 1) + " " + ps[i]["version"].toString() + " | " + juce::String (ld[0], 1) + " → " + juce::String (ld[1], 1)
+                     + " | " + juce::String (sd[0], 1) + " → " + juce::String (sd[1], 1) + " |");
+            }
+        }
+        return 0;
+    }
     if (cmd == "verify" && argc >= 4)
     {
         juce::StringArray seams; if (argc >= 5) seams.addTokens (argv[4], ",", "");
