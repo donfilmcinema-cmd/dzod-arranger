@@ -129,6 +129,12 @@ struct Project
     bool setEdges (int piece, double from, double to);
     // Край группы кусков: левый край первого / правый край последнего на dt секунд (dt > 0 — шире).
     bool extendGroup (const std::vector<int>& pieceIndices, double dtStart, double dtEnd);
+    // Край куска как в Samplitude («обрезка края», автор 29.10): звук стоит на месте во времени, двигается только граница.
+    // Граница между соседями — общая: открытое у одного забирается у другого (сосед укорачивается с этой стороны).
+    // Крайний левый / правый край стола — просто открывает скрытое до начала / после конца.
+    // right — правый край куска; dt — сдвиг границы, с (> 0 — вправо). Возвращает сдвиг, который удалось сделать
+    // (в пределах файлов, у куска и соседа остаётся не меньше minLength). Для группы — край первого / последнего куска группы.
+    double moveEdge (int piece, bool right, double dt, double minLength = 0.05);
     struct Section { juce::String label; int firstPiece = 0, lastPiece = 0; };
     std::vector<Section> sections() const;                        // подряд идущие куски с одной меткой — одна часть
 

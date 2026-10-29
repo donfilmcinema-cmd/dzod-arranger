@@ -177,6 +177,20 @@ int main (int argc, char** argv)
             check (r.numberedLabel ({ 4 }, "Verse") == "Verse 2" && Project::partType ("Pre-chorus 3") == "Pre-chorus", "номер по порядку в исходнике");
             check (r.setEdges (0, -5, 12) && r.pieces[0].from == 0 && r.pieces[0].to == 12 && ! r.setEdges (0, 50, 50), "края куска: раздвинуть, не за начало файла");
             check (r.extendGroup ({ 1, 2 }, 2, 3) && r.pieces[1].from == 8 && r.pieces[2].to == 63, "края группы");
+            {   // край как в Samplitude: звук на месте, граница общая с соседом
+                Project e; Version v1; v1.id = "A"; v1.lengthSec = 100; v1.stems = { s1 }; Version v2 = v1; v2.id = "B"; e.versions = { v1, v2 };
+                e.pieces = { e.makePiece ("A", 10, 20), e.makePiece ("B", 30, 40), e.makePiece ("A", 50, 60) };
+                const double d1 = e.moveEdge (0, true, 2.0);      // правый край куска 1 вправо: открывает A 20..22, у B забирает 30..32
+                check (d1 == 2.0 && e.pieces[0].to == 22 && e.pieces[1].from == 32 && std::abs (e.tableStartOf (1) + (32 - e.pieces[1].from) - 12) < 1e-9,
+                       "край вправо: открыто 2 с, сосед укорочен, звук соседа на месте");
+                const double d2 = e.moveEdge (1, false, -4.0);    // левый край куска 2 влево: открывает B 28..32, A укорочен до 18
+                check (d2 == -4.0 && e.pieces[0].to == 18 && e.pieces[1].from == 28, "край влево: открыто у второго, первый укорочен");
+                check (std::abs (e.tableLength() - 30) < 1e-9, "длина стола не меняется (звук не растягивается)");
+                const double d3 = e.moveEdge (0, false, -15.0);   // левый край стола: открыть до начала файла (A с 10 — до 0)
+                check (d3 == -10.0 && e.pieces[0].from == 0, "край стола: открывает до начала файла");
+                const double d4 = e.moveEdge (1, true, 100.0);    // сосед не меньше 0.05 с
+                check (std::abs (e.pieces[2].from - (60 - 0.05)) < 1e-9 && d4 > 0, "сосед не исчезает");
+            }
             Project u; u.strength = 0.3; u.samples["drums"] = 1; u.resetUnify(); check (u.samples.empty() && u.strength == 0.85 && u.limitDb == 12, "resetUnify");
         }
         out (bad == 0 ? "selftest passed" : "selftest FAILED"); return bad == 0 ? 0 : 4;

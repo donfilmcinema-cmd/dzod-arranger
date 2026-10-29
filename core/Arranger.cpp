@@ -277,6 +277,32 @@ bool Project::extendGroup (const std::vector<int>& idx, double dtStart, double d
     return ok;
 }
 
+double Project::moveEdge (int i, bool right, double dt, double minLen)
+{
+    if (i < 0 || i >= (int) pieces.size() || dt == 0) return 0;
+    auto lenOf = [&] (const Piece& p) { if (auto* v = findVersion (p.version)) if (v->lengthSec > 0) return v->lengthSec; return 1e9; };
+    // граница справа от куска k = между k и k+1 (если k+1 есть)
+    const int a = right ? i : i - 1, b = right ? i + 1 : i;     // слева и справа от границы
+    double lo = -1e9, hi = 1e9;
+    if (a >= 0)
+    {
+        auto& A = pieces[(size_t) a];
+        lo = juce::jmax (lo, A.from + minLen - A.to);           // A не короче minLen
+        hi = juce::jmin (hi, lenOf (A) - A.to);                 // A не дальше конца файла
+    }
+    if (b < (int) pieces.size())
+    {
+        auto& B = pieces[(size_t) b];
+        lo = juce::jmax (lo, -B.from);                          // B не раньше начала файла
+        hi = juce::jmin (hi, B.to - minLen - B.from);           // B не короче minLen
+    }
+    const double d = juce::jlimit (juce::jmin (0.0, lo), juce::jmax (0.0, hi), dt);
+    if (d == 0) return 0;
+    if (a >= 0) pieces[(size_t) a].to += d;
+    if (b < (int) pieces.size()) pieces[(size_t) b].from += d;
+    return d;
+}
+
 void Project::renamePart (int part, const juce::String& label)
 {
     if (parts.count (part)) parts[part] = label;
@@ -410,7 +436,7 @@ juce::var Project::toVar() const
 
 bool Project::fromVar (const juce::var& v, juce::String& error)
 {
-    if (! v.isObject() || v["versions"].getArray() == nullptr) { error = ru ("Это не проект DZOD Arranger"); return false; }
+    if (! v.isObject() || v["versions"].getArray() == nullptr) { error = juce::String ("Not a DZOD Arranger project"); return false; }
     *this = Project();
     for (auto& x : *v["versions"].getArray())
     {
@@ -544,7 +570,7 @@ bool Engine::analyseVersion (Version& v, const juce::File& cacheDir, Progress pr
     juce::File drums;
     for (auto& s : v.stems) if (s.role == "drums") drums = s.file;
     const bool noDrums = drums == juce::File();      // нет стема барабанов (полный микс) — темп ищем по сумме всех стемов
-    if (v.stems.empty()) { error = ru ("В версии «") + v.id + ru ("» нет звуковых файлов"); return false; }
+    if (v.stems.empty()) { error = juce::String ("Variant ") + v.id + juce::String (" has no audio files"); return false; }
 
     // ключ кэша — файлы и роли (одинаковые id «V1» у разных песен не путаются)
     juce::String key; for (auto& s : v.stems) key << s.file.getFullPathName() << "|" << s.file.getSize() << "|" << s.file.getLastModificationTime().toMilliseconds() << "|" << s.role << ";";
@@ -561,13 +587,13 @@ bool Engine::analyseVersion (Version& v, const juce::File& cacheDir, Progress pr
             v.grid = A.grid; v.bars = A.bars; v.sections = A.sections;
             v.bpm = A.tempoEstimate > 0 ? A.tempoEstimate : A.bpmMedian; v.bpmMin = A.bpmMin; v.bpmMax = A.bpmMax;
             v.analysed = true;
-            say (1.0f, ru ("Готово (из кэша): ") + v.id);
+            say (1.0f, juce::String ("Ready (cached): ") + v.id);
             return true;
         }
     }
 
     // все стемы: громкость, сумма для анализа, гармонические — для тональности
-    say (0.02f, ru ("Читаю стемы: ") + v.id);
+    say (0.02f, juce::String ("Reading stems: ") + v.id);
     std::vector<juce::AudioBuffer<float>> bufs (v.stems.size());
     double sr = 0;
     for (size_t i = 0; i < v.stems.size(); ++i)
@@ -606,14 +632,14 @@ bool Engine::analyseVersion (Version& v, const juce::File& cacheDir, Progress pr
     Stemmer st;
     if (! (cache.existsAsFile() && st.readAnalysis (cache)))
     {
-        say (0.15f, ru ("Ищу темп, доли и части: ") + v.id);
+        say (0.15f, juce::String ("Finding tempo, beats and parts: ") + v.id);
         juce::AudioBuffer<float> sum (2, n); sum.clear();
         for (auto& b : bufs) for (int c = 0; c < 2; ++c) sum.addFrom (c, 0, b, c, 0, b.getNumSamples());
         const auto tmp = cacheDir.getChildFile (v.id + "_sum.wav"); tmp.deleteFile();
         {
             juce::WavAudioFormat wav;
             std::unique_ptr<juce::AudioFormatWriter> w (wav.createWriterFor (new juce::FileOutputStream (tmp), sr, 2, 24, {}, 0));
-            if (w == nullptr) { error = ru ("Не удалось записать временный файл"); return false; }
+            if (w == nullptr) { error = juce::String ("Could not write a temporary file"); return false; }
             w->writeFromAudioSampleBuffer (sum, 0, sum.getNumSamples());
         }
         stemmer::Job job; job.drums = noDrums ? tmp : drums; job.full = tmp; job.projectBpm = 0; job.straightenGrid = true;   // сетка без местных «вилок» в сбивках (drummer, 26.10)
@@ -623,19 +649,19 @@ bool Engine::analyseVersion (Version& v, const juce::File& cacheDir, Progress pr
         if (! ok) { error = st.lastError(); return false; }
         st.writeAnalysis (cache, st.analysis().autoShift, 0, "DZOD Arranger");
     }
-    if (isCancelled (cancel)) { error = ru ("Отменено"); return false; }
+    if (isCancelled (cancel)) { error = juce::String ("Cancelled"); return false; }
     const auto& A = st.analysis();
     v.analysisFile = cache;
     v.grid = A.grid; v.bars = A.bars; v.sections = A.sections;
     v.bpm = A.tempoEstimate > 0 ? A.tempoEstimate : A.bpmMedian; v.bpmMin = A.bpmMin; v.bpmMax = A.bpmMax;
 
-    say (0.85f, ru ("Тональность: ") + v.id);
+    say (0.85f, juce::String ("Key: ") + v.id);
     std::vector<const juce::AudioBuffer<float>*> harm;
     for (size_t i = 0; i < v.stems.size(); ++i) if (harmonicRole (v.stems[i].role) && ! v.stems[i].silent) harm.push_back (&bufs[i]);
     v.key = detectKey (harm, sr);
     v.analysed = true;
     writeMeta (v, meta);
-    say (1.0f, ru ("Готово: ") + v.id);
+    say (1.0f, juce::String ("Ready: ") + v.id);
     return true;
 }
 
@@ -674,12 +700,12 @@ TempoProposal Engine::analyseTempo (const Project& p, double song)
 bool Engine::mixIntoStems (Project& P, const juce::File& cacheDir, const juce::File& outFolder, Progress progress, juce::var& report, juce::String& error, const std::atomic<bool>* cancel)
 {
     auto say = [&] (float f, const juce::String& m) { if (progress) progress (f, m); };
-    if (P.pieces.empty()) { error = ru ("На столе нет кусков"); return false; }
+    if (P.pieces.empty()) { error = juce::String ("No slices on the table"); return false; }
     for (auto& v : P.versions)
         if (! v.analysed && ! analyseVersion (v, cacheDir, progress, error, cancel)) return false;
 
     const double bpm = songBpm (P);
-    if (bpm <= 0) { error = ru ("Не задан темп песни и нет образца барабанов"); return false; }
+    if (bpm <= 0) { error = juce::String ("No song tempo and no drums reference"); return false; }
     juce::StringArray warnings;
 
     // 1) края кусков — на сильные доли; длина каждого куска на выходе и место в песне
@@ -692,7 +718,7 @@ bool Engine::mixIntoStems (Project& P, const juce::File& cacheDir, const juce::F
     {
         auto& pc = P.pieces[i];
         auto* v = P.findVersion (pc.version);
-        if (v == nullptr) { error = ru ("Кусок ") + juce::String ((int) i + 1) + ru (": нет версии ") + pc.version; return false; }
+        if (v == nullptr) { error = juce::String ("Slice ") + juce::String ((int) i + 1) + juce::String (": no variant ") + pc.version; return false; }
         if (st.find (v->id) == st.end())
         {
             auto s = std::make_unique<Stemmer>();
@@ -704,10 +730,10 @@ bool Engine::mixIntoStems (Project& P, const juce::File& cacheDir, const juce::F
         const auto& g = P.snapToBars ? (v->bars.empty() ? v->grid : v->bars) : v->grid;
         double f = snapTo (g, pc.from), t = snapTo (g, pc.to);
         if (t <= f + 0.1 && &g != &v->grid) { f = snapTo (v->grid, pc.from); t = snapTo (v->grid, pc.to);
-            if (t > f + 0.1) warnings.add (ru ("Кусок ") + juce::String ((int) i + 1) + " (" + v->id + ru (") короче такта — края поставлены на доли, песня сдвинется с тактов")); }
-        if (t <= f + 0.1) { warnings.add (ru ("Кусок ") + juce::String ((int) i + 1) + " (" + v->id + ", " + fmt (pc.length(), 2) + ru (" с) короче доли — пропущен")); continue; }
+            if (t > f + 0.1) warnings.add (juce::String ("Slice ") + juce::String ((int) i + 1) + " (" + v->id + juce::String (") is shorter than a bar - edges put on beats, the song moves off the bars")); }
+        if (t <= f + 0.1) { warnings.add (juce::String ("Slice ") + juce::String ((int) i + 1) + " (" + v->id + ", " + fmt (pc.length(), 2) + juce::String (" s) is shorter than a beat - skipped")); continue; }
         if (! st[v->id]->pieceMap (f, t, bpm, p.map, p.dur, p.a, p.b) || p.dur <= 0.05)
-        { warnings.add (ru ("Кусок ") + juce::String ((int) i + 1) + " (" + v->id + ru (") — не удалось построить растяжку, пропущен")); continue; }
+        { warnings.add (juce::String ("Slice ") + juce::String ((int) i + 1) + " (" + v->id + juce::String (") - could not build the stretch, skipped")); continue; }
         p.srcBpm = v->localBpm (p.a, p.b);
         p.stretchPct = 100.0 * (bpm / juce::jmax (1.0, p.srcBpm) - 1.0);
         p.at = at; at += p.dur;
@@ -715,7 +741,7 @@ bool Engine::mixIntoStems (Project& P, const juce::File& cacheDir, const juce::F
         plOf[i] = (int) pl.size();
         pl.push_back (std::move (p));
     }
-    if (pl.empty()) { error = ru ("Нет ни одного куска длиннее доли"); return false; }
+    if (pl.empty()) { error = juce::String ("No slice is longer than a beat"); return false; }
     const double total = at;
     const int handle = Stemmer::StretchPlan::Hs;                    // запас по краям куска для кроссфейда
     const int xf = juce::jmax (8, (int) std::lround (P.crossfadeMs * 0.001 * kOutRate));
@@ -724,7 +750,7 @@ bool Engine::mixIntoStems (Project& P, const juce::File& cacheDir, const juce::F
     // 2) подгонка к образцу: по каждой роли — кривая и усиление на версию
     //    спектр образца — кусок-образец роли; спектр версии — все её места в песне;
     //    громкость — по стему версии целиком (так сохраняется разница куплет / припев внутри версии)
-    say (0.05f, ru ("Сравниваю версии с образцами"));
+    say (0.05f, juce::String ("Comparing with the references"));
     const bool byPiece = P.matchBy != "version";
     auto fixKey = [&] (size_t plIndex) { return byPiece ? "#" + juce::String ((int) plIndex) : pl[plIndex].v->id; };
     struct Fix { Spectrum curve {}; double gainDb = 0; double lufs = -70; bool any = false; };
@@ -745,7 +771,7 @@ bool Engine::mixIntoStems (Project& P, const juce::File& cacheDir, const juce::F
         bool used = false; for (auto& p : pl) if (p.v == &v) used = true;
         bool isRef = false; for (auto& [r, id] : refVersion) if (id == v.id) isRef = true;
         if (! used && ! isRef) continue;
-        say (0.08f, ru ("Измеряю: ") + v.id);
+        say (0.08f, juce::String ("Measuring: ") + v.id);
         std::map<juce::String, juce::AudioBuffer<float>> roleBuf;
         for (auto& s : v.stems)
         {
@@ -797,7 +823,7 @@ bool Engine::mixIntoStems (Project& P, const juce::File& cacheDir, const juce::F
         if (refSpec.find (role) == refSpec.end())
         {
             bool needed = false; for (auto& p : pl) if (P.isOn (p.pc, role)) needed = true;
-            if (needed) warnings.add (neuroName (role) + ru (": нет образца — звук не подгонялся (пометьте кусок-образец)"));
+            if (needed) warnings.add (neuroName (role) + juce::String (": no reference - sound not unified (mark a reference slice)"));
             continue;
         }
         for (auto& [vid, spec] : useSpec[role])
@@ -831,8 +857,8 @@ bool Engine::mixIntoStems (Project& P, const juce::File& cacheDir, const juce::F
     {
         std::vector<size_t> mine; for (size_t i = 0; i < pl.size(); ++i) if (pl[i].v == &v) mine.push_back (i);
         if (mine.empty()) continue;
-        if (isCancelled (cancel)) { error = ru ("Отменено"); return false; }
-        say (0.15f + 0.75f * doneVersions / juce::jmax (1, usedVersions), ru ("Растягиваю куски версии ") + v.id + " -> " + fmt (bpm) + " BPM");
+        if (isCancelled (cancel)) { error = juce::String ("Cancelled"); return false; }
+        say (0.15f + 0.75f * doneVersions / juce::jmax (1, usedVersions), juce::String ("Stretching slices of ") + v.id + " -> " + fmt (bpm) + " BPM");
         std::vector<juce::AudioBuffer<float>> bufs (v.stems.size());
         int n = 0;
         for (size_t i = 0; i < v.stems.size(); ++i)
@@ -858,7 +884,7 @@ bool Engine::mixIntoStems (Project& P, const juce::File& cacheDir, const juce::F
             const double dur2 = p.dur + 2.0 * handle / sr;
             Stemmer::StretchPlan plan;
             const bool wsola = P.stretcher == "wsola";
-            if (wsola && ! Stemmer::planStretch (mono, sr, dur2, map2, plan)) { error = ru ("Растяжка не удалась: ") + v.id; return false; }
+            if (wsola && ! Stemmer::planStretch (mono, sr, dur2, map2, plan)) { error = juce::String ("Stretch failed: ") + v.id; return false; }
             const int want = (int) std::lround (dur2 * sr);
             // растяжка стемов куска — параллельно (стемы независимы), раскладка в песню — по очереди
             std::vector<size_t> todo;
@@ -886,7 +912,7 @@ bool Engine::mixIntoStems (Project& P, const juce::File& cacheDir, const juce::F
                 }
                 segs[i] = std::move (seg);
             });
-            if (isCancelled (cancel)) { error = ru ("Отменено"); return false; }
+            if (isCancelled (cancel)) { error = juce::String ("Cancelled"); return false; }
             for (size_t i : todo)
             {
                 const auto& s = v.stems[i];
@@ -919,7 +945,7 @@ bool Engine::mixIntoStems (Project& P, const juce::File& cacheDir, const juce::F
     if (trim < 0) for (auto& [r, b] : out) b.applyGain ((float) std::pow (10.0, trim / 20.0));
 
     // 5) запись: WAV по ролям, dzod_stems.json, отчёт
-    say (0.92f, ru ("Записываю стемы"));
+    say (0.92f, juce::String ("Writing stems"));
     outFolder.createDirectory();
     juce::Array<juce::var> stemsList;
     for (auto& role : outRoles())
@@ -928,7 +954,7 @@ bool Engine::mixIntoStems (Project& P, const juce::File& cacheDir, const juce::F
         const auto f = outFolder.getChildFile (neuroName (role) + ".wav"); f.deleteFile();
         juce::WavAudioFormat wav;
         std::unique_ptr<juce::AudioFormatWriter> w (wav.createWriterFor (new juce::FileOutputStream (f), kOutRate, 2, 24, {}, 0));
-        if (w == nullptr) { error = ru ("Не удалось записать ") + f.getFullPathName(); return false; }
+        if (w == nullptr) { error = juce::String ("Could not write ") + f.getFullPathName(); return false; }
         w->writeFromAudioSampleBuffer (it->second, 0, it->second.getNumSamples());
         auto* o = new juce::DynamicObject();
         o->setProperty ("file", f.getFileName()); o->setProperty ("role", role); o->setProperty ("name", neuroName (role));
@@ -938,17 +964,17 @@ bool Engine::mixIntoStems (Project& P, const juce::File& cacheDir, const juce::F
         // роль есть в песне, но не во всех кусках
         for (size_t i = 0; i < pl.size(); ++i)
             if (! P.isOn (pl[i].pc, role))
-                warnings.add (neuroName (role) + ru (": в куске ") + juce::String (pl[i].index + 1) + " (" + pl[i].v->id
-                              + (pl[i].v->hasRole (role) ? ru (") инструмент убран — там тишина") : ru (") этого инструмента нет — там тишина")));
+                warnings.add (neuroName (role) + juce::String (": slice ") + juce::String (pl[i].index + 1) + " (" + pl[i].v->id
+                              + (pl[i].v->hasRole (role) ? juce::String (") instrument removed - silence there") : juce::String (") has no such instrument - silence there")));
     }
     for (size_t i = 0; i < pl.size(); ++i)
     {
-        if (std::abs (pl[i].stretchPct) > 10) warnings.add (ru ("Кусок ") + juce::String (pl[i].index + 1) + ru (": растяжка ") + fmt (pl[i].stretchPct) + ru (" % — больше 10 %, послушайте внимательно"));
+        if (std::abs (pl[i].stretchPct) > 10) warnings.add (juce::String ("Slice ") + juce::String (pl[i].index + 1) + juce::String (": stretch ") + fmt (pl[i].stretchPct) + juce::String (" % - more than 10 %, listen carefully"));
         if (i > 0 && ! pl[i].key.compatibleWith (pl[i - 1].key))
-            warnings.add (ru ("Стык ") + juce::String (pl[i - 1].index + 1) + "-" + juce::String (pl[i].index + 1) + ru (": похоже, разная тональность (") + pl[i - 1].key.name() + " / " + pl[i].key.name()
-                          + ru (", сходство нот ") + juce::String (pl[i].key.similarity (pl[i - 1].key), 2) + ")");
+            warnings.add (juce::String ("Seam ") + juce::String (pl[i - 1].index + 1) + "-" + juce::String (pl[i].index + 1) + juce::String (": the keys may differ (") + pl[i - 1].key.name() + " / " + pl[i].key.name()
+                          + juce::String (", notes similarity ") + juce::String (pl[i].key.similarity (pl[i - 1].key), 2) + ")");
     }
-    if (trim < 0) warnings.add (ru ("Сумма стемов громче -1 dBFS — все стемы тише на ") + fmt (-trim) + ru (" дБ"));
+    if (trim < 0) warnings.add (juce::String ("The sum of the stems is above -1 dBFS - all stems lowered by ") + fmt (-trim) + juce::String (" dB"));
 
     // метки частей -> секунды и такты песни
     juce::Array<juce::var> sectionsVar;
@@ -1031,7 +1057,7 @@ bool Engine::mixIntoStems (Project& P, const juce::File& cacheDir, const juce::F
     report = juce::var (R);
     outFolder.getChildFile ("arranger_report.json").replaceWithText (juce::JSON::toString (report));
     P.songBpm = bpm;
-    say (1.0f, ru ("Готово"));
+    say (1.0f, juce::String ("Done"));
     return true;
 }
 //==============================================================================
@@ -1043,10 +1069,10 @@ void Project::resetUnify()
 
 bool Engine::pieceSpectrum (const Project& P, int piece, const juce::String& role, Spectrum& out, juce::String& error, double maxSec)
 {
-    if (piece < 0 || piece >= (int) P.pieces.size()) { error = ru ("Нет такого куска"); return false; }
+    if (piece < 0 || piece >= (int) P.pieces.size()) { error = juce::String ("No such slice"); return false; }
     const auto& pc = P.pieces[(size_t) piece];
     const auto* v = P.findVersion (pc.version);
-    if (v == nullptr) { error = ru ("Нет версии ") + pc.version; return false; }
+    if (v == nullptr) { error = juce::String ("No variant ") + pc.version; return false; }
     juce::AudioBuffer<float> sum; double sr = 0;
     const double len = maxSec > 0 ? juce::jmin (pc.length(), maxSec) : pc.length();
     for (auto& s : v->stems)
@@ -1054,7 +1080,7 @@ bool Engine::pieceSpectrum (const Project& P, int piece, const juce::String& rol
         if (s.outRole != role || s.silent) continue;
         std::unique_ptr<juce::AudioFormatReader> r;
         { juce::AudioFormatManager fm; fm.registerBasicFormats(); r.reset (fm.createReaderFor (s.file)); }
-        if (r == nullptr) { error = ru ("Не читается ") + s.file.getFileName(); return false; }
+        if (r == nullptr) { error = juce::String ("Cannot read ") + s.file.getFileName(); return false; }
         sr = r->sampleRate;
         const int n = (int) (len * sr);
         if (sum.getNumSamples() == 0) { sum.setSize (2, n); sum.clear(); }
@@ -1063,7 +1089,7 @@ bool Engine::pieceSpectrum (const Project& P, int piece, const juce::String& rol
         if (r->numChannels == 1) b.copyFrom (1, 0, b, 0, 0, n);
         for (int c = 0; c < 2; ++c) sum.addFrom (c, 0, b, c, 0, juce::jmin (n, sum.getNumSamples()));
     }
-    if (sum.getNumSamples() == 0) { error = ru ("В куске нет инструмента ") + role; return false; }
+    if (sum.getNumSamples() == 0) { error = juce::String ("The slice has no instrument ") + role; return false; }
     out = normalised (ltas (sum, sr));
     return true;
 }
@@ -1093,7 +1119,7 @@ static bool readStemsList (const juce::File& folder, juce::Array<juce::File>& fi
 {
     const auto j = juce::JSON::parse (folder.getChildFile ("dzod_stems.json").loadFileAsString());
     auto* a = j["stems"].getArray();
-    if (a == nullptr) { error = ru ("В папке нет dzod_stems.json — сначала MIX INTO STEMS"); return false; }
+    if (a == nullptr) { error = juce::String ("No dzod_stems.json in the folder - MIX INTO STEMS first"); return false; }
     for (auto& s : *a) { files.add (folder.getChildFile (s["file"].toString())); roles.add (s["role"].toString()); }
     return true;
 }
@@ -1111,20 +1137,20 @@ bool Engine::exportSong (const juce::File& stemsFolder, const juce::File& target
         if (sum.getNumSamples() < b.getNumSamples()) sum.setSize (2, b.getNumSamples(), true, true);
         for (int c = 0; c < 2; ++c) sum.addFrom (c, 0, b, c, 0, b.getNumSamples());
     }
-    if (sum.getNumSamples() == 0) { error = ru ("Стемов нет"); return false; }
+    if (sum.getNumSamples() == 0) { error = juce::String ("No stems"); return false; }
     // без мастеринга: только защита от перегруза — общий запас до -1 dBFS (MP3: -1,5)
     const double ceil = format == "mp3" ? -1.5 : -1.0, pk = peakDb (sum);
     if (pk > ceil) sum.applyGain ((float) std::pow (10.0, (ceil - pk) / 20.0));
     target.getParentDirectory().createDirectory(); target.deleteFile();
     if (format == "mp3")
     {
-        if (! dzod::writeMp3 (target, sum, sr, 320, false)) { error = ru ("Не удалось записать MP3"); return false; }
+        if (! dzod::writeMp3 (target, sum, sr, 320, false)) { error = juce::String ("Could not write the MP3"); return false; }
         return true;
     }
     const int bits = format == "wav16" ? 16 : 24;
     juce::WavAudioFormat wav;
     std::unique_ptr<juce::AudioFormatWriter> w (wav.createWriterFor (new juce::FileOutputStream (target), sr, 2, bits, {}, 0));
-    if (w == nullptr) { error = ru ("Не удалось записать ") + target.getFullPathName(); return false; }
+    if (w == nullptr) { error = juce::String ("Could not write ") + target.getFullPathName(); return false; }
     if (bits == 16)
     {   // TPDF-дизер перед 16 битами
         juce::Random rnd (1);
@@ -1149,7 +1175,7 @@ bool Engine::saveStems (const juce::File& stemsFolder, const juce::File& destRoo
         if (! rel.endsWithIgnoreCase (".wav")) rel << ".wav";
         const auto dst = destRoot.getChildFile (rel);
         dst.getParentDirectory().createDirectory();
-        if (! files[i].copyFileTo (dst)) { error = ru ("Не удалось записать ") + dst.getFullPathName(); return false; }
+        if (! files[i].copyFileTo (dst)) { error = juce::String ("Could not write ") + dst.getFullPathName(); return false; }
         written.add (dst.getFullPathName());
         folderOut = dst.getParentDirectory();
     }
