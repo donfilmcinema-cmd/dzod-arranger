@@ -88,9 +88,13 @@ struct Project
     std::map<juce::String, double> limits;        // предел кривой по роли, дБ; нет — общий limitDb
     int sample = -1;                              // образец для ролей без своего (-1 — нет)
     double songBpm = 0;                           // 0 — по образцу барабанов
-    double crossfadeMs = 10, strength = 0.7, limitDb = 6;
+    // Unify по умолчанию: сила 85 %, предел ±12 дБ (автор 29.10: тихий и глухой кусок не подтягивался при ±6 дБ / 70 %)
+    double crossfadeMs = 10, strength = 0.85, limitDb = 12;
     bool matchEq = true, matchLoudness = true;
     bool snapToBars = true;
+    // Unify: "piece" — каждый кусок к образцу отдельно (громкость и спектр куска; по умолчанию, замечание автора 29.10),
+    //        "version" — одна поправка на версию (сохраняет разницу куплет / припев внутри версии)
+    juce::String matchBy = "piece";
     juce::String stretcher = "phase";             // "phase" — фазовый вокодер Signalsmith (по умолчанию), "wsola" — старая растяжка Stemmer (сравнение)                       // ALIGN: края кусков на сильные доли (false — на ближайшие доли)
 
     Version* findVersion (const juce::String& id);
@@ -116,6 +120,15 @@ struct Project
     // Метка части на группу кусков (едет с кусками, при резке — на обе половины). Пустое имя — снять метку.
     int setPart (const std::vector<int>& pieceIndices, const juce::String& label);
     void renamePart (int part, const juce::String& label);
+    // Номер части внутри вариации (автор 29.10: первый куплет второй вариации — тоже «Verse 1», а не «Verse 2»):
+    // type + " " + N, где N — порядок этой части среди частей того же типа той же версии по времени в исходнике.
+    // Окно ставит его по умолчанию; автор может сменить цифру (renamePart / setPart с другим именем).
+    juce::String numberedLabel (const std::vector<int>& pieceIndices, const juce::String& type) const;
+    static juce::String partType (const juce::String& label);      // «Verse 2» -> «Verse»
+    // Края куска (раздвинуть обрезанное): новые from/to в секундах версии, в пределах файла. Возвращает false, если кусок пустой.
+    bool setEdges (int piece, double from, double to);
+    // Край группы кусков: левый край первого / правый край последнего на dt секунд (dt > 0 — шире).
+    bool extendGroup (const std::vector<int>& pieceIndices, double dtStart, double dtEnd);
     struct Section { juce::String label; int firstPiece = 0, lastPiece = 0; };
     std::vector<Section> sections() const;                        // подряд идущие куски с одной меткой — одна часть
 

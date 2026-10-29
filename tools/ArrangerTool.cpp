@@ -167,6 +167,18 @@ int main (int argc, char** argv)
         check (h.redo (p) && p.rolesInSong().size() == 1, "Redo");
         while (h.undo (p)) {}
         check (p.pieces.size() == 2 && p.parts.empty() && ! h.canUndo() && h.canRedo(), "Undo до начала");
+        {   // нумерация частей внутри вариации и края кусков (замечания автора 29.10)
+            Project r; Version va; va.id = "A"; va.lengthSec = 100; va.stems = { s1 }; Version vb = va; vb.id = "B"; r.versions = { va, vb };
+            r.pieces = { r.makePiece ("A", 0, 10), r.makePiece ("A", 10, 30), r.makePiece ("A", 40, 60), r.makePiece ("B", 5, 25), r.makePiece ("B", 50, 70) };
+            r.setPart ({ 1 }, r.numberedLabel ({ 1 }, "Verse"));
+            r.setPart ({ 2 }, r.numberedLabel ({ 2 }, "Verse"));
+            r.setPart ({ 3 }, r.numberedLabel ({ 3 }, "Verse"));
+            check (r.parts[r.pieces[1].part] == "Verse 1" && r.parts[r.pieces[2].part] == "Verse 2" && r.parts[r.pieces[3].part] == "Verse 1", "Verse 1 / Verse 2 внутри вариации, первый куплет второй вариации — Verse 1");
+            check (r.numberedLabel ({ 4 }, "Verse") == "Verse 2" && Project::partType ("Pre-chorus 3") == "Pre-chorus", "номер по порядку в исходнике");
+            check (r.setEdges (0, -5, 12) && r.pieces[0].from == 0 && r.pieces[0].to == 12 && ! r.setEdges (0, 50, 50), "края куска: раздвинуть, не за начало файла");
+            check (r.extendGroup ({ 1, 2 }, 2, 3) && r.pieces[1].from == 8 && r.pieces[2].to == 63, "края группы");
+            Project u; u.strength = 0.3; u.samples["drums"] = 1; u.resetUnify(); check (u.samples.empty() && u.strength == 0.85 && u.limitDb == 12, "resetUnify");
+        }
         out (bad == 0 ? "selftest passed" : "selftest FAILED"); return bad == 0 ? 0 : 4;
     }
     if (cmd == "eqtest")
@@ -186,6 +198,70 @@ int main (int argc, char** argv)
             double e = 0, p = 0;
             for (int i = a0; i < a1; ++i) { const double ph = 2 * juce::MathConstants<double>::pi * f * i / sr, y = A * std::sin (ph) + B * std::cos (ph), x = b.getSample (0, i); e += (x - y) * (x - y); p += y * y; }
             out ("  " + juce::String (f, 0) + " Hz: gain " + juce::String (20 * std::log10 (std::sqrt (A * A + B * B) / 0.5), 2) + " dB, residual " + juce::String (10 * std::log10 (e / p + 1e-30), 1) + " dB");
+        }
+        return 0;
+    }
+    if (cmd == "stress" && argc >= 5)
+    {   // монтаж как у автора: разрезы где угодно (короткие куски тоже), перестановки, убранные инструменты, метки; затем сведение
+        const juce::File root (argv[2]), cache (argv[3]), dst (argv[4]);
+        const int seeds = argc >= 6 ? juce::String (argv[5]).getIntValue() : 5;
+        std::vector<Version> vs;
+        for (auto id : { "04A", "04B", "04C", "04D" })
+        {
+            auto v = Engine::scanVersion (root.getChildFile (id));
+            if (! Engine::analyseVersion (v, cache, nullptr, err)) { out ("ERROR " + err); return 1; }
+            vs.push_back (v);
+        }
+        int failed = 0;
+        for (int seed = 1; seed <= seeds; ++seed)
+        {
+            juce::Random rnd (seed);
+            Project p; p.versions = vs;
+            for (auto& v : vs) p.pieces.push_back (p.makePiece (v.id, v.bars.front(), v.lengthSec));
+            for (int k = 0; k < 14; ++k) p.split (rnd.nextInt ((int) p.pieces.size()), rnd.nextDouble() * p.tableLength());
+            // короткие куски (меньше такта) и обрезки у края
+            for (int k = 0; k < 3; ++k) { const double t0 = rnd.nextDouble() * p.tableLength(); p.split (p.pieceAt (t0), t0); p.split (p.pieceAt (t0 + 0.6), t0 + 0.6); }
+            while (p.pieces.size() > 9) p.remove (rnd.nextInt ((int) p.pieces.size()));
+            for (int k = 0; k < 5; ++k) p.move (rnd.nextInt ((int) p.pieces.size()), rnd.nextInt ((int) p.pieces.size()));
+            p.pieces[(size_t) rnd.nextInt ((int) p.pieces.size())].off.insert ("guitar");
+            p.setPart ({ 0, 1 }, "Verse 1");
+            p.sample = rnd.nextInt ((int) p.pieces.size());
+            juce::String e; juce::var r;
+            const auto o = dst.getChildFile ("seed" + juce::String (seed));
+            const bool ok = Engine::mixIntoStems (p, cache, o, nullptr, r, e);
+            juce::String lens; for (auto& pc : p.pieces) lens << juce::String (pc.length(), 1) << " ";
+            out ("seed " + juce::String (seed) + ": " + (ok ? "OK " + juce::String ((double) r["lengthSec"], 1) + " s, warnings " + juce::String (r["warnings"].getArray()->size()) : "FAIL " + e) + "   pieces " + lens);
+            if (ok) for (auto& w : *r["warnings"].getArray()) out ("    ! " + w.toString());
+            if (! ok) ++failed;
+        }
+        return failed == 0 ? 0 : 5;
+    }
+    if (cmd == "unifytest" && argc >= 6)
+    {   // кусок-образец из версии A, следом кусок из B (тише и глуше) — после Unify громкость и спектр B должны подтянуться к A
+        const juce::File va (argv[2]), vb (argv[3]), cache (argv[4]), dst (argv[5]);
+        Project p;
+        for (auto f : { va, vb }) { auto v = Engine::scanVersion (f); if (! Engine::analyseVersion (v, cache, nullptr, err)) { out ("ERROR " + err); return 1; } p.versions.push_back (v); }
+        const auto& A = p.versions[0]; const auto& B = p.versions[1];
+        p.pieces = { p.makePiece (A.id, A.bars[8], A.bars[20]), p.makePiece (B.id, B.bars[20], B.bars[36]) };
+        p.sample = 0;
+        for (int mode = 0; mode < 3; ++mode)
+        {
+            Project q = p; if (mode == 0) { q.matchEq = false; q.matchLoudness = false; } if (mode == 2) q.matchBy = "version";
+            juce::var r; const auto o = dst.getChildFile ("mode" + juce::String (mode));
+            if (! Engine::mixIntoStems (q, cache, o, nullptr, r, err)) { out ("ERROR " + err); return 1; }
+            const double cut = (double) (*r["pieces"].getArray())[1]["at"];
+            juce::String line = juce::String (mode == 0 ? "no unify      " : mode == 1 ? "unify piece   " : "unify version ");
+            for (auto role : { "drums", "bass", "guitar", "vocals" })
+            {
+                juce::AudioBuffer<float> b; double sr = 0; juce::String e;
+                if (! Stemmer::loadAudio (o.getChildFile (neuroName (role) + ".wav"), b, sr, e)) continue;
+                const auto c = (juce::int64) (cut * sr);
+                const double la = lufs (b, sr, 0, c), lb = lufs (b, sr, c, b.getNumSamples());
+                const auto sa = normalised (ltas (b, sr, 0, c)), sb = normalised (ltas (b, sr, c, b.getNumSamples()));
+                double hf = 0; int n = 0; for (int k = 0; k < kGrid; ++k) if (gridHz (k) >= 4000 && gridHz (k) <= 12000) { hf += sb[(size_t) k] - sa[(size_t) k]; ++n; }
+                line << role << ": loud " << juce::String (lb - la, 1) << " dB, highs " << juce::String (hf / juce::jmax (1, n), 1) << " dB   ";
+            }
+            out (line);
         }
         return 0;
     }

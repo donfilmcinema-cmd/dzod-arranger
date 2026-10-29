@@ -234,6 +234,49 @@ int Project::setPart (const std::vector<int>& idx, const juce::String& label)
     return part;
 }
 
+juce::String Project::partType (const juce::String& label)
+{
+    auto s = label.trim();
+    while (s.isNotEmpty() && (juce::CharacterFunctions::isDigit (s.getLastCharacter()) || s.getLastCharacter() == ' ')) s = s.dropLastCharacters (1);
+    return s;
+}
+
+juce::String Project::numberedLabel (const std::vector<int>& idx, const juce::String& type) const
+{
+    if (idx.empty()) return type;
+    double from = 1e12; juce::String ver;
+    for (int i : idx) if (i >= 0 && i < (int) pieces.size()) { if (pieces[(size_t) i].from < from) { from = pieces[(size_t) i].from; ver = pieces[(size_t) i].version; } }
+    // части того же типа в той же версии раньше по исходнику (одна часть = одна метка)
+    std::set<int> earlier;
+    for (auto& p : pieces)
+        if (p.version == ver && p.part != 0 && parts.count (p.part) && p.from < from - 0.05 && partType (parts.at (p.part)).equalsIgnoreCase (type)
+            && std::find_if (idx.begin(), idx.end(), [&] (int i) { return i >= 0 && i < (int) pieces.size() && pieces[(size_t) i].id == p.id; }) == idx.end())
+            earlier.insert (p.part);
+    return type + " " + juce::String ((int) earlier.size() + 1);
+}
+
+bool Project::setEdges (int i, double from, double to)
+{
+    if (i < 0 || i >= (int) pieces.size()) return false;
+    auto& p = pieces[(size_t) i];
+    double len = 1e9; if (auto* v = findVersion (p.version)) if (v->lengthSec > 0) len = v->lengthSec;
+    from = juce::jlimit (0.0, len, from); to = juce::jlimit (0.0, len, to);
+    if (to <= from + 0.01) return false;
+    p.from = from; p.to = to;
+    return true;
+}
+
+bool Project::extendGroup (const std::vector<int>& idx, double dtStart, double dtEnd)
+{
+    if (idx.empty()) return false;
+    const int first = *std::min_element (idx.begin(), idx.end()), last = *std::max_element (idx.begin(), idx.end());
+    if (first < 0 || last >= (int) pieces.size()) return false;
+    bool ok = true;
+    if (dtStart != 0) ok &= setEdges (first, pieces[(size_t) first].from - dtStart, pieces[(size_t) first].to);
+    if (dtEnd != 0) ok &= setEdges (last, pieces[(size_t) last].from, pieces[(size_t) last].to + dtEnd);
+    return ok;
+}
+
 void Project::renamePart (int part, const juce::String& label)
 {
     if (parts.count (part)) parts[part] = label;
@@ -261,7 +304,7 @@ juce::var Project::editState() const
     auto* root = new juce::DynamicObject();
     root->setProperty ("songBpm", songBpm); root->setProperty ("crossfadeMs", crossfadeMs);
     root->setProperty ("strength", strength); root->setProperty ("limitDb", limitDb);
-    root->setProperty ("matchEq", matchEq); root->setProperty ("matchLoudness", matchLoudness); root->setProperty ("snapToBars", snapToBars); root->setProperty ("stretcher", stretcher);
+    root->setProperty ("matchEq", matchEq); root->setProperty ("matchLoudness", matchLoudness); root->setProperty ("snapToBars", snapToBars); root->setProperty ("stretcher", stretcher); root->setProperty ("matchBy", matchBy);
     root->setProperty ("sample", sample); root->setProperty ("nextId", nextId);
     auto* sm = new juce::DynamicObject(); for (auto& [k, v] : samples) sm->setProperty (k, v);
     root->setProperty ("samples", juce::var (sm));
@@ -284,10 +327,11 @@ juce::var Project::editState() const
 
 void Project::applyEditState (const juce::var& v)
 {
-    songBpm = num (v["songBpm"]); crossfadeMs = num (v["crossfadeMs"], 10); strength = num (v["strength"], 0.7); limitDb = num (v["limitDb"], 6);
+    songBpm = num (v["songBpm"]); crossfadeMs = num (v["crossfadeMs"], 10); strength = num (v["strength"], 0.85); limitDb = num (v["limitDb"], 12);
     matchEq = v["matchEq"].isVoid() || (bool) v["matchEq"]; matchLoudness = v["matchLoudness"].isVoid() || (bool) v["matchLoudness"];
     snapToBars = v["snapToBars"].isVoid() || (bool) v["snapToBars"];
     stretcher = v["stretcher"].isVoid() ? juce::String ("phase") : v["stretcher"].toString();
+    matchBy = v["matchBy"].isVoid() ? juce::String ("piece") : v["matchBy"].toString();
     sample = (int) num (v["sample"], -1); nextId = (int) num (v["nextId"], 1);
     samples.clear(); strengths.clear(); limits.clear(); parts.clear(); pieces.clear();
     if (auto* sm = v["samples"].getDynamicObject()) for (auto& p : sm->getProperties()) samples[p.name.toString()] = (int) p.value;
@@ -639,7 +683,8 @@ bool Engine::mixIntoStems (Project& P, const juce::File& cacheDir, const juce::F
     juce::StringArray warnings;
 
     // 1) края кусков — на сильные доли; длина каждого куска на выходе и место в песне
-    struct Placed { Piece pc; Version* v = nullptr; double a = 0, b = 0, dur = 0, at = 0, srcBpm = 0, stretchPct = 0; std::function<double (int)> map; Key key; };
+    std::vector<int> plOf (P.pieces.size(), -1);                   // номер куска -> номер в раскладке (-1 — пропущен)
+    struct Placed { int index = 0; Piece pc; Version* v = nullptr; double a = 0, b = 0, dur = 0, at = 0, srcBpm = 0, stretchPct = 0; std::function<double (int)> map; Key key; };
     std::vector<Placed> pl;
     std::map<juce::String, std::unique_ptr<Stemmer>> st;
     double at = 0;
@@ -654,17 +699,23 @@ bool Engine::mixIntoStems (Project& P, const juce::File& cacheDir, const juce::F
             if (! s->readAnalysis (v->analysisFile)) { error = s->lastError(); return false; }
             st[v->id] = std::move (s);
         }
-        Placed p; p.pc = pc; p.v = v;
+        Placed p; p.pc = pc; p.v = v; p.index = (int) i;
+        // края — на сильные доли; кусок короче такта — на доли; короче доли — пропускаем (не валим всю песню)
         const auto& g = P.snapToBars ? (v->bars.empty() ? v->grid : v->bars) : v->grid;
-        const double f = snapTo (g, pc.from), t = snapTo (g, pc.to);
-        if (t <= f + 0.1) { error = ru ("Кусок ") + juce::String ((int) i + 1) + (P.snapToBars ? ru (" короче такта") : ru (" короче доли")); return false; }
-        if (! st[v->id]->pieceMap (f, t, bpm, p.map, p.dur, p.a, p.b)) { error = ru ("Кусок ") + juce::String ((int) i + 1) + ru (": не удалось построить растяжку"); return false; }
+        double f = snapTo (g, pc.from), t = snapTo (g, pc.to);
+        if (t <= f + 0.1 && &g != &v->grid) { f = snapTo (v->grid, pc.from); t = snapTo (v->grid, pc.to);
+            if (t > f + 0.1) warnings.add (ru ("Кусок ") + juce::String ((int) i + 1) + " (" + v->id + ru (") короче такта — края поставлены на доли, песня сдвинется с тактов")); }
+        if (t <= f + 0.1) { warnings.add (ru ("Кусок ") + juce::String ((int) i + 1) + " (" + v->id + ", " + fmt (pc.length(), 2) + ru (" с) короче доли — пропущен")); continue; }
+        if (! st[v->id]->pieceMap (f, t, bpm, p.map, p.dur, p.a, p.b) || p.dur <= 0.05)
+        { warnings.add (ru ("Кусок ") + juce::String ((int) i + 1) + " (" + v->id + ru (") — не удалось построить растяжку, пропущен")); continue; }
         p.srcBpm = v->localBpm (p.a, p.b);
         p.stretchPct = 100.0 * (bpm / juce::jmax (1.0, p.srcBpm) - 1.0);
         p.at = at; at += p.dur;
         pc.from = p.a; pc.to = p.b;
+        plOf[i] = (int) pl.size();
         pl.push_back (std::move (p));
     }
+    if (pl.empty()) { error = ru ("Нет ни одного куска длиннее доли"); return false; }
     const double total = at;
     const int handle = Stemmer::StretchPlan::Hs;                    // запас по краям куска для кроссфейда
     const int xf = juce::jmax (8, (int) std::lround (P.crossfadeMs * 0.001 * kOutRate));
@@ -674,6 +725,8 @@ bool Engine::mixIntoStems (Project& P, const juce::File& cacheDir, const juce::F
     //    спектр образца — кусок-образец роли; спектр версии — все её места в песне;
     //    громкость — по стему версии целиком (так сохраняется разница куплет / припев внутри версии)
     say (0.05f, ru ("Сравниваю версии с образцами"));
+    const bool byPiece = P.matchBy != "version";
+    auto fixKey = [&] (size_t plIndex) { return byPiece ? "#" + juce::String ((int) plIndex) : pl[plIndex].v->id; };
     struct Fix { Spectrum curve {}; double gainDb = 0; double lufs = -70; bool any = false; };
     std::map<juce::String, std::map<juce::String, Fix>> fix;      // outRole -> версия -> поправка
     std::map<juce::String, Spectrum> refSpec;                       // outRole -> спектр образца
@@ -682,7 +735,7 @@ bool Engine::mixIntoStems (Project& P, const juce::File& cacheDir, const juce::F
     for (auto& role : outRoles())
     {
         const int s = P.sampleFor (role);
-        if (s < 0) continue;
+        if (s < 0 || plOf[(size_t) s] < 0) continue;
         refVersion[role] = P.pieces[(size_t) s].version;
     }
     std::map<juce::String, std::map<juce::String, Spectrum>> useSpec;   // outRole -> версия -> спектр мест в песне
@@ -716,14 +769,27 @@ bool Engine::mixIntoStems (Project& P, const juce::File& cacheDir, const juce::F
                     const int off = used2.getNumSamples(); used2.setSize (2, off + s1 - s0, true, true);
                     for (int c = 0; c < 2; ++c) used2.copyFrom (c, off, b, c, s0, s1 - s0);
                 }
-            if (used2.getNumSamples() > 0) useSpec[role][v.id] = ltas (used2, v.sampleRate);
+            if (used2.getNumSamples() > 0 && ! byPiece) useSpec[role][v.id] = ltas (used2, v.sampleRate);
             const int s = P.sampleFor (role);
-            if (s >= 0 && P.pieces[(size_t) s].version == v.id)
+            if (s >= 0 && plOf[(size_t) s] >= 0 && P.pieces[(size_t) s].version == v.id)
             {
-                const auto& sp = pl[(size_t) s];
-                refSpec[role] = ltas (b, v.sampleRate, (juce::int64) (sp.a * v.sampleRate), (juce::int64) (sp.b * v.sampleRate));
-                refLufs[role] = lufs (b, v.sampleRate);
+                const auto& sp = pl[(size_t) plOf[(size_t) s]];
+                const auto a0 = (juce::int64) (sp.a * v.sampleRate), a1 = (juce::int64) (sp.b * v.sampleRate);
+                refSpec[role] = ltas (b, v.sampleRate, a0, a1);
+                refLufs[role] = byPiece ? lufs (b, v.sampleRate, a0, a1) : lufs (b, v.sampleRate);
             }
+            if (byPiece)   // каждый кусок отдельно: свой спектр и своя громкость
+                for (size_t k = 0; k < pl.size(); ++k)
+                {
+                    const auto& p = pl[k];
+                    if (p.v != &v || ! P.isOn (p.pc, role)) continue;
+                    const auto a0 = (juce::int64) (p.a * v.sampleRate), a1 = juce::jmin ((juce::int64) b.getNumSamples(), (juce::int64) (p.b * v.sampleRate));
+                    if (a1 <= a0) continue;
+                    const double l = lufs (b, v.sampleRate, a0, a1);
+                    if (l < -60) continue;                       // инструмент в куске почти молчит — не трогаем
+                    useSpec[role]["#" + juce::String ((int) k)] = ltas (b, v.sampleRate, a0, a1);
+                    wholeLufs[role]["#" + juce::String ((int) k)] = l;
+                }
         }
     }
     for (auto& role : outRoles())
@@ -739,7 +805,15 @@ bool Engine::mixIntoStems (Project& P, const juce::File& cacheDir, const juce::F
             Fix fx;
             if (P.matchEq) fx.curve = eqCurve (spec, refSpec[role], P.strengthFor (role), P.limitFor (role));
             fx.lufs = wholeLufs[role][vid];
-            if (P.matchLoudness) fx.gainDb = juce::jlimit (-12.0, 12.0, (refLufs[role] - fx.lufs) * juce::jmin (1.0, P.strengthFor (role) / 0.7));
+            // громкость — с учётом того, насколько кривая сама меняет уровень (иначе кусок остаётся тише образца)
+            double eqDelta = 0;
+            {
+                double p0 = 0, p1 = 0;
+                for (int k = 0; k < kGrid; ++k) { const double pw = std::pow (10.0, spec[(size_t) k] / 10.0); p0 += pw; p1 += pw * std::pow (10.0, fx.curve[(size_t) k] / 10.0); }
+                if (p0 > 0 && p1 > 0) eqDelta = 10.0 * std::log10 (p1 / p0);
+            }
+            if (P.matchLoudness) fx.gainDb = juce::jlimit (-18.0, 18.0, (refLufs[role] - fx.lufs) * juce::jmin (1.0, P.strengthFor (role) / 0.7) - eqDelta);
+            else fx.gainDb = -eqDelta;
             fx.any = true;
             fix[role][vid] = fx;
         }
@@ -803,7 +877,7 @@ bool Engine::mixIntoStems (Project& P, const juce::File& cacheDir, const juce::F
                 auto fit = fix.find (s.outRole);
                 if (fit != fix.end())
                 {
-                    auto f2 = fit->second.find (v.id);
+                    auto f2 = fit->second.find (fixKey (idx));
                     if (f2 != fit->second.end())
                     {
                         applyEq (seg, kOutRate, f2->second.curve);
@@ -864,14 +938,14 @@ bool Engine::mixIntoStems (Project& P, const juce::File& cacheDir, const juce::F
         // роль есть в песне, но не во всех кусках
         for (size_t i = 0; i < pl.size(); ++i)
             if (! P.isOn (pl[i].pc, role))
-                warnings.add (neuroName (role) + ru (": в куске ") + juce::String ((int) i + 1) + " (" + pl[i].v->id
+                warnings.add (neuroName (role) + ru (": в куске ") + juce::String (pl[i].index + 1) + " (" + pl[i].v->id
                               + (pl[i].v->hasRole (role) ? ru (") инструмент убран — там тишина") : ru (") этого инструмента нет — там тишина")));
     }
     for (size_t i = 0; i < pl.size(); ++i)
     {
-        if (std::abs (pl[i].stretchPct) > 10) warnings.add (ru ("Кусок ") + juce::String ((int) i + 1) + ru (": растяжка ") + fmt (pl[i].stretchPct) + ru (" % — больше 10 %, послушайте внимательно"));
+        if (std::abs (pl[i].stretchPct) > 10) warnings.add (ru ("Кусок ") + juce::String (pl[i].index + 1) + ru (": растяжка ") + fmt (pl[i].stretchPct) + ru (" % — больше 10 %, послушайте внимательно"));
         if (i > 0 && ! pl[i].key.compatibleWith (pl[i - 1].key))
-            warnings.add (ru ("Стык ") + juce::String ((int) i) + "-" + juce::String ((int) i + 1) + ru (": похоже, разная тональность (") + pl[i - 1].key.name() + " / " + pl[i].key.name()
+            warnings.add (ru ("Стык ") + juce::String (pl[i - 1].index + 1) + "-" + juce::String (pl[i].index + 1) + ru (": похоже, разная тональность (") + pl[i - 1].key.name() + " / " + pl[i].key.name()
                           + ru (", сходство нот ") + juce::String (pl[i].key.similarity (pl[i - 1].key), 2) + ")");
     }
     if (trim < 0) warnings.add (ru ("Сумма стемов громче -1 dBFS — все стемы тише на ") + fmt (-trim) + ru (" дБ"));
@@ -882,8 +956,11 @@ bool Engine::mixIntoStems (Project& P, const juce::File& cacheDir, const juce::F
         const double barSec = 240.0 / bpm;
         for (auto& sc : P.sections())
         {
+            int f0 = -1, l0 = -1;
+            for (int k = sc.firstPiece; k <= sc.lastPiece; ++k) if (plOf[(size_t) k] >= 0) { if (f0 < 0) f0 = plOf[(size_t) k]; l0 = plOf[(size_t) k]; }
+            if (f0 < 0) continue;
             auto* o = new juce::DynamicObject();
-            const double a = pl[(size_t) sc.firstPiece].at, b = pl[(size_t) sc.lastPiece].at + pl[(size_t) sc.lastPiece].dur;
+            const double a = pl[(size_t) f0].at, b = pl[(size_t) l0].at + pl[(size_t) l0].dur;
             o->setProperty ("label", sc.label); o->setProperty ("startSec", a); o->setProperty ("endSec", b);
             o->setProperty ("startBar", (int) std::lround (a / barSec) + 1); o->setProperty ("endBar", (int) std::lround (b / barSec));
             sectionsVar.add (juce::var (o));
@@ -909,7 +986,7 @@ bool Engine::mixIntoStems (Project& P, const juce::File& cacheDir, const juce::F
     for (size_t i = 0; i < pl.size(); ++i)
     {
         auto* o = new juce::DynamicObject();
-        o->setProperty ("n", (int) i + 1); o->setProperty ("version", pl[i].v->id);
+        o->setProperty ("n", pl[i].index + 1); o->setProperty ("version", pl[i].v->id);
         o->setProperty ("srcFrom", pl[i].a); o->setProperty ("srcTo", pl[i].b);
         o->setProperty ("at", pl[i].at); o->setProperty ("dur", pl[i].dur);
         o->setProperty ("bars", juce::roundToInt (pl[i].dur * bpm / 60.0 / 4.0 * 100) / 100.0);
@@ -921,6 +998,11 @@ bool Engine::mixIntoStems (Project& P, const juce::File& cacheDir, const juce::F
         pr.add (juce::var (o));
     }
     R->setProperty ("pieces", pr);
+    {   // сетка песни для окна: доли и такты (ровные, темп песни), с
+        juce::Array<juce::var> beats, bars; const double beat = 60.0 / bpm;
+        for (int k = 0; k * beat < total + 1e-6; ++k) { beats.add (k * beat); if (k % 4 == 0) bars.add (k * beat); }
+        R->setProperty ("beats", beats); R->setProperty ("bars", bars); R->setProperty ("matchBy", byPiece ? "piece" : "version");
+    }
     R->setProperty ("sections", sectionsVar);
     {
         auto tp = analyseTempo (P, bpm);
@@ -932,7 +1014,10 @@ bool Engine::mixIntoStems (Project& P, const juce::File& cacheDir, const juce::F
         for (auto& [vid, f] : per)
         {
             auto* o = new juce::DynamicObject();
-            o->setProperty ("role", role); o->setProperty ("version", vid); o->setProperty ("gainDb", f.gainDb); o->setProperty ("strength", P.strengthFor (role)); o->setProperty ("limitDb", P.limitFor (role));
+            const bool pk = vid.startsWith ("#");
+            const int k = pk ? vid.substring (1).getIntValue() : -1;
+            o->setProperty ("role", role); o->setProperty ("version", pk ? pl[(size_t) k].v->id : vid);
+            if (pk) o->setProperty ("piece", pl[(size_t) k].index + 1); o->setProperty ("gainDb", f.gainDb); o->setProperty ("strength", P.strengthFor (role)); o->setProperty ("limitDb", P.limitFor (role));
             o->setProperty ("sample", refVersion[role]);
             juce::Array<juce::var> oct; for (double x : octaveTable (f.curve)) oct.add (std::round (x * 10) / 10);
             o->setProperty ("eqOctaves", oct);
@@ -953,7 +1038,7 @@ bool Engine::mixIntoStems (Project& P, const juce::File& cacheDir, const juce::F
 void Project::resetUnify()
 {
     samples.clear(); sample = -1; strengths.clear(); limits.clear();
-    strength = 0.7; limitDb = 6; matchEq = true; matchLoudness = true;
+    strength = 0.85; limitDb = 12; matchEq = true; matchLoudness = true; matchBy = "piece";
 }
 
 bool Engine::pieceSpectrum (const Project& P, int piece, const juce::String& role, Spectrum& out, juce::String& error, double maxSec)
