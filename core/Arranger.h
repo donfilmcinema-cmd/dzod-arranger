@@ -73,7 +73,7 @@ struct TempoProposal
     std::vector<double> pieceBpm;     // по порядку кусков
     std::vector<double> deviationPct; // отклонение куска от темпа песни, %: зелёный < 1, жёлтый < 2,5, красный больше
     double median = 0;                // медиана, взвешенная длиной кусков, округлена до 0,1
-    double drumsSample = 0;           // темп куска-образца барабанов (0 — образца нет)
+    double drumsSample = 0;           // темп куска-образца барабанов (0 — образец Drums явно не выбран)
     double proposed = 0;              // что ставить в поле BPM: образец барабанов, иначе медиана
 };
 

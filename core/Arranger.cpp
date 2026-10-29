@@ -635,7 +635,7 @@ bool Engine::analyseVersion (Version& v, const juce::File& cacheDir, Progress pr
         say (0.15f, juce::String ("Finding tempo, beats and parts: ") + v.id);
         juce::AudioBuffer<float> sum (2, n); sum.clear();
         for (auto& b : bufs) for (int c = 0; c < 2; ++c) sum.addFrom (c, 0, b, c, 0, b.getNumSamples());
-        const auto tmp = cacheDir.getChildFile (v.id + "_sum.wav"); tmp.deleteFile();
+        const auto tmp = cacheDir.getChildFile (base + "_sum.wav"); tmp.deleteFile();   // имя по ключу кэша — параллельный разбор не пересекается
         {
             juce::WavAudioFormat wav;
             std::unique_ptr<juce::AudioFormatWriter> w (wav.createWriterFor (new juce::FileOutputStream (tmp), sr, 2, 24, {}, 0));
@@ -688,7 +688,10 @@ TempoProposal Engine::analyseTempo (const Project& p, double song)
         double total = 0; for (auto& x : w) total += x.second;
         double acc = 0; for (auto& x : w) { acc += x.second; if (acc >= total / 2) { r.median = std::round (x.first * 10.0) / 10.0; break; } }
     }
-    const int s = p.sampleFor ("drums");
+    // темп образца барабанов — только если образец Drums выбран явно; общий образец (часто первый кусок — вступление,
+    // самоаудит 29.10: GENERATE THE DAY 114 -> 121 BPM) темп песни не задаёт — тогда медиана по кускам
+    auto it = p.samples.find ("drums");
+    const int s = it != p.samples.end() ? it->second : -1;
     if (s >= 0 && s < (int) r.pieceBpm.size()) r.drumsSample = std::round (r.pieceBpm[(size_t) s] * 10.0) / 10.0;
     r.proposed = r.drumsSample > 0 ? r.drumsSample : r.median;
     const double ref = song > 0 ? song : r.proposed;
@@ -752,6 +755,20 @@ bool Engine::mixIntoStems (Project& P, const juce::File& cacheDir, const juce::F
     //    громкость — по стему версии целиком (так сохраняется разница куплет / припев внутри версии)
     say (0.05f, juce::String ("Comparing with the references"));
     const bool byPiece = P.matchBy != "version";
+    // образец роли: свой (samples[role]); общий — если в нём роль звучит; иначе самый длинный кусок, где она звучит
+    // (самоаудит 29.10: во вступлении-образце нет вокала — вокал не подгонялся)
+    auto refFor = [&] (const juce::String& role) -> int
+    {
+        auto it = P.samples.find (role);
+        if (it != P.samples.end() && it->second >= 0 && it->second < (int) P.pieces.size()) return it->second;
+        const int g = P.sampleFor (role);
+        if (g < 0) return -1;
+        if (plOf[(size_t) g] >= 0 && P.isOn (P.pieces[(size_t) g], role)) return g;
+        int best = -1;
+        for (int i = 0; i < (int) P.pieces.size(); ++i)
+            if (plOf[(size_t) i] >= 0 && P.isOn (P.pieces[(size_t) i], role) && (best < 0 || P.pieces[(size_t) i].length() > P.pieces[(size_t) best].length())) best = i;
+        return best;
+    };
     auto fixKey = [&] (size_t plIndex) { return byPiece ? "#" + juce::String ((int) plIndex) : pl[plIndex].v->id; };
     struct Fix { Spectrum curve {}; double gainDb = 0; double lufs = -70; bool any = false; };
     std::map<juce::String, std::map<juce::String, Fix>> fix;      // outRole -> версия -> поправка
@@ -760,7 +777,7 @@ bool Engine::mixIntoStems (Project& P, const juce::File& cacheDir, const juce::F
     std::map<juce::String, juce::String> refVersion;
     for (auto& role : outRoles())
     {
-        const int s = P.sampleFor (role);
+        const int s = refFor (role);
         if (s < 0 || plOf[(size_t) s] < 0) continue;
         refVersion[role] = P.pieces[(size_t) s].version;
     }
@@ -796,7 +813,7 @@ bool Engine::mixIntoStems (Project& P, const juce::File& cacheDir, const juce::F
                     for (int c = 0; c < 2; ++c) used2.copyFrom (c, off, b, c, s0, s1 - s0);
                 }
             if (used2.getNumSamples() > 0 && ! byPiece) useSpec[role][v.id] = ltas (used2, v.sampleRate);
-            const int s = P.sampleFor (role);
+            const int s = refFor (role);
             if (s >= 0 && plOf[(size_t) s] >= 0 && P.pieces[(size_t) s].version == v.id)
             {
                 const auto& sp = pl[(size_t) plOf[(size_t) s]];
