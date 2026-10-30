@@ -479,6 +479,118 @@ int main (int argc, char** argv)
         out ("audit: " + juce::String (n) + " checks, " + juce::String (bad) + " failed");
         return bad == 0 ? 0 : 6;
     }
+    if (cmd == "regress" && argc >= 5)
+    {   // регрессии: жалобы автора, которые были исправлены, — каждая своим тестом (правило sound 30.10)
+        const juce::File rigor (juce::String::fromUTF8 (argv[2])), cache (juce::String::fromUTF8 (argv[3])), dst (juce::String::fromUTF8 (argv[4]));
+        int n = 0, bad = 0;
+        auto check = [&] (const char* id, bool c, const juce::String& what, const juce::String& detail = {})
+        { ++n; if (! c) ++bad; out (juce::String (c ? "PASS  " : "FAIL  ") + id + "  " + what + (detail.isNotEmpty() ? "   [" + detail + "]" : juce::String())); };
+        juce::String e;
+        std::vector<Version> vs;
+        for (auto id : { "04A", "04B", "04C", "04D" }) { auto v = Engine::scanVersion (rigor.getChildFile (id)); Engine::analyseVersion (v, cache, nullptr, e); vs.push_back (v); }
+        Project p; p.versions = vs;
+        auto bar = [&] (int vi, int b) { const auto& bs = vs[(size_t) vi].bars; return bs[(size_t) juce::jlimit (0, (int) bs.size() - 1, b)]; };
+        const int plan[][3] = { { 0, 0, 8 }, { 1, 8, 20 }, { 2, 20, 36 }, { 3, 36, 44 }, { 0, 44, 56 } };
+        for (auto& q : plan) p.pieces.push_back (p.makePiece (vs[(size_t) q[0]].id, bar (q[0], q[1]), bar (q[0], q[2])));
+        p.sample = 1; p.samples["drums"] = 1;    // темп песни = темп куска 04B — он почти не растягивается
+        if (juce::SystemStats::getEnvironmentVariable ("DZOD_REGRESS_WSOLA", {}).isNotEmpty()) p.stretcher = "wsola";   // проверка самого теста
+        juce::var rep; const auto o = dst.getChildFile ("rigor");
+        const bool ok = Engine::mixIntoStems (p, cache, o, nullptr, rep, e);
+
+        // R1 28.10 «металлические стеклянные призвуки» — WSOLA: растяжка по умолчанию фазовая, кусок 04B без растяжки почти не отличается от исходника
+        check ("R1", Project().stretcher == "phase", "default stretcher is the phase vocoder (not WSOLA)");
+        if (ok)
+        {
+            juce::AudioBuffer<float> outB, srcB; double sr = 0, sr2 = 0;
+            Stemmer::loadAudio (o.getChildFile ("Neuro Drums.wav"), outB, sr, e);
+            Stemmer::loadAudio (vs[1].stems[0].file.getSiblingFile (vs[1].stems[0].file.getFileName().replace ("(Bass)", "(Drums)")), srcB, sr2, e);
+            const auto& pc = *rep["pieces"].getArray();
+            const double at = (double) pc[1]["at"], from = (double) pc[1]["srcFrom"];
+            // спектральное расстояние по кадрам 2048 (сдвиг ±10 мс), медиана
+            juce::dsp::FFT fft (11); std::vector<float> fa (4096), fb (4096); std::vector<double> d;
+            auto mag = [&] (const juce::AudioBuffer<float>& b, juce::int64 s0, std::vector<float>& f)
+            { std::fill (f.begin(), f.end(), 0.0f); for (int i = 0; i < 2048; ++i) { const auto k = s0 + i; if (k >= 0 && k < b.getNumSamples()) f[(size_t) i] = (b.getSample (0, (int) k) + b.getSample (1, (int) k)) * 0.5f * (0.5f - 0.5f * std::cos (2 * juce::MathConstants<float>::pi * i / 2048)); }
+              fft.performFrequencyOnlyForwardTransform (f.data()); };
+            for (double tt = at + 1; tt < at + 9; tt += 0.1)
+            {
+                mag (outB, (juce::int64) (tt * sr), fa);
+                double best = 1e9;
+                for (int lag = -480; lag <= 480; lag += 24)
+                {
+                    mag (srcB, (juce::int64) ((from + (tt - at)) * sr2) + lag, fb);
+                    float mx = 0; for (int k = 0; k < 1024; ++k) mx = juce::jmax (mx, fa[(size_t) k] + fb[(size_t) k]);
+                    double s = 0; int m = 0;
+                    for (int k = 1; k < 1024; ++k) if (fa[(size_t) k] + fb[(size_t) k] > 1e-4f * mx) { const double x = 20 * std::log10 ((fa[(size_t) k] + 1e-9) / (fb[(size_t) k] + 1e-9)); s += x * x; ++m; }
+                    if (m > 0) best = juce::jmin (best, std::sqrt (s / m));
+                }
+                if (best < 1e8) d.push_back (best);
+            }
+            std::sort (d.begin(), d.end());
+            const double med = d.empty() ? 99 : d[d.size() / 2];
+            check ("R1", med < 3.0, "drums of an unstretched slice ~ the source (no metallic comb)", "spectral distance median " + juce::String (med, 2) + " dB, WSOLA gave 4.0");
+        }
+        // R2 28.10 ложная тревога «разная тональность» на стыке 29,4 с (автор: тональность одна)
+        juce::String keyWarn; if (ok) for (auto& w : *rep["warnings"].getArray()) if (w.toString().contains ("keys may differ")) keyWarn << w.toString();
+        check ("R2", ok && keyWarn.isEmpty(), "RIGOR: no false 'keys may differ' warning", keyWarn);
+        // R7 29.10 п. 8 «непонятно, выравнивает каждый удар или кусок» — ALIGN по долям: доли на сетке
+        if (ok)
+        {
+            Stemmer st; dzod::stemmer::Job job; job.drums = o.getChildFile ("Neuro Drums.wav"); job.full = job.drums; job.projectBpm = (double) rep["songBpm"]; job.straightenGrid = true;
+            st.analyse (job, nullptr);
+            const auto& g = st.analysis().grid; const double beat = 60.0 / (double) rep["songBpm"];
+            std::vector<double> ph; for (double x : g) { double r = std::fmod (x, beat); if (r > beat / 2) r -= beat; ph.push_back (r); }
+            auto s2 = ph; std::sort (s2.begin(), s2.end()); const double off = s2.empty() ? 0 : s2[s2.size() / 2];
+            std::vector<double> dev; for (double x : ph) dev.push_back (std::abs (x - off) * 1000); std::sort (dev.begin(), dev.end());
+            const double p90 = dev.empty() ? 99 : dev[dev.size() * 9 / 10];
+            check ("R7", p90 < 10.0, "ALIGN puts every beat on the grid (p90 < 10 ms)", juce::String (p90, 1) + " ms");
+        }
+        // R3/R4 29.10 п. 9–11 «Unify не работает, Mix и Save ничего не делают» — обрезки короче такта
+        {
+            Project q = p; const double t0 = q.tableStartOf (2) + 3.0; q.split (q.pieceAt (t0), t0); q.split (q.pieceAt (t0 + 0.5), t0 + 0.5);
+            juce::var r2; const bool ok2 = Engine::mixIntoStems (q, cache, dst.getChildFile ("sliver"), nullptr, r2, e);
+            check ("R4", ok2, "a slice shorter than a bar does not stop MIX / UNIFY / SAVE", e);
+        }
+        // R3 29.10 п. 9 «тихий глухой кусок остался тихим и глухим»
+        {
+            const auto dull = dst.getChildFile ("dull 04C"); dull.deleteRecursively(); dull.createDirectory();
+            Spectrum curve {}; for (int k = 0; k < kGrid; ++k) curve[(size_t) k] = gridHz (k) > 3000 ? -6.0 : 0.0;
+            for (auto& s : vs[2].stems)
+            {
+                juce::AudioBuffer<float> b; double sr = 0; Stemmer::loadAudio (s.file, b, sr, e);
+                applyEq (b, sr, curve); b.applyGain (0.5f);
+                juce::WavAudioFormat wav; const auto f = dull.getChildFile (s.file.getFileNameWithoutExtension() + ".wav");
+                std::unique_ptr<juce::AudioFormatWriter> w (wav.createWriterFor (new juce::FileOutputStream (f), sr, (unsigned) b.getNumChannels(), 24, {}, 0));
+                if (w) w->writeFromAudioSampleBuffer (b, 0, b.getNumSamples());
+            }
+            auto vd = Engine::scanVersion (dull); vd.id = "dull"; Engine::analyseVersion (vd, cache, nullptr, e);
+            Project q; q.versions = { vs[1], vd };
+            q.pieces = { q.makePiece (vs[1].id, vs[1].bars[8], vs[1].bars[20]), q.makePiece ("dull", vd.bars[20], vd.bars[36]) }; q.sample = 0;
+            juce::var r3; const auto od = dst.getChildFile ("unify"), on = dst.getChildFile ("no unify");
+            const bool ok3 = Engine::mixIntoStems (q, cache, od, nullptr, r3, e);
+            Project qn = q; qn.matchEq = false; qn.matchLoudness = false; juce::var r4;
+            Engine::mixIntoStems (qn, cache, on, nullptr, r4, e);
+            double worstL = 0, worstH = 1e9;
+            if (ok3)
+            {
+                const double cut = (double) (*r3["pieces"].getArray())[1]["at"];
+                for (auto role : { "drums", "guitar", "vocals" })
+                {
+                    juce::AudioBuffer<float> b, bn; double sr = 0; Stemmer::loadAudio (od.getChildFile (neuroName (role) + ".wav"), b, sr, e); Stemmer::loadAudio (on.getChildFile (neuroName (role) + ".wav"), bn, sr, e);
+                    const auto c = (juce::int64) (cut * sr);
+                    worstL = juce::jmax (worstL, std::abs (lufs (b, sr, c, b.getNumSamples()) - lufs (b, sr, 0, c)));
+                    // верхи: насколько Unify поднял 4–12 кГц глухого куска (было срезано на 6 дБ)
+                    const auto su = ltas (b, sr, c, b.getNumSamples()), sn = ltas (bn, sr, c, bn.getNumSamples());
+                    const auto lu = lufs (b, sr, c, b.getNumSamples()), ln = lufs (bn, sr, c, bn.getNumSamples());
+                    double hf = 0; int m = 0; for (int k = 0; k < kGrid; ++k) if (gridHz (k) >= 4000 && gridHz (k) <= 12000) { hf += (su[(size_t) k] - lu) - (sn[(size_t) k] - ln); ++m; }
+                    worstH = juce::jmin (worstH, hf / juce::jmax (1, m));
+                }
+            }
+            check ("R3", ok3 && worstL < 2.0, "Unify brings a slice 6 dB quieter back to the reference loudness (+-2 dB)", juce::String (worstL, 1) + " dB");
+            check ("R3", ok3 && worstH > 3.0, "Unify brings back the highs of a dull slice (4-12 kHz cut by 6 dB: at least +3 dB back)", "+" + juce::String (worstH, 1) + " dB");
+        }
+        out ("regressions: " + juce::String (n - bad) + "/" + juce::String (n) + " passed");
+        return bad == 0 ? 0 : 7;
+    }
     if (cmd == "verify" && argc >= 4)
     {
         juce::StringArray seams; if (argc >= 5) seams.addTokens (argv[4], ",", "");
