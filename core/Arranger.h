@@ -6,6 +6,7 @@
 //      звук каждой роли подгоняется к образцу роли (громкость + кривая не больше ±limit дБ),
 //      на роль — один WAV 48 кГц 24 бит (Neuro Drums, Neuro Bass, …) + dzod_stems.json + отчёт arranger_report.json.
 #include "Match.h"
+#include "Phase.h"
 #include "../third_party/stemmer/DzodStemmer.h"
 #include <atomic>
 #include <functional>
@@ -46,6 +47,7 @@ struct Version
     std::vector<double> grid, bars;   // доли и сильные доли, с
     std::vector<dzod::stemmer::Section> sections;
     Key key;
+    PhaseCheck phase;                 // проверка сильной доли по барабанам (при первом разборе; из кэша — не заполняется)
     double mixLufs = -70;             // громкость всей версии (сумма стемов) — «Сравнить» на равной громкости
     std::map<juce::String, std::vector<float>> env;   // огибающая по строкам стола, 100 точек в секунду (для волн в окне)
     juce::String title;               // подпись варианта (например «Suno v4 · take 1»)
@@ -179,6 +181,10 @@ public:
     // Результат Stemmer кэшируется в cacheDir/<id>_dzod_stemmer.json; повторный вызов читает кэш.
     // cancel (необязательно): окно ставит true — операция прерывается с ошибкой «Отменено».
     static bool analyseVersion (Version&, const juce::File& cacheDir, Progress, juce::String& error, const std::atomic<bool>* cancel = nullptr);
+    // Сильная доля вручную (если Version::phase.ambiguous — окно спрашивает автора «здесь / на 1/8 позже»):
+    // beats = ±0.5 — вся сетка долей и тактов сдвигается на полдоли; ±1, ±2, ±3 — начало такта переходит на другую долю.
+    // Пишет поправку в кэш анализа (analysisFile), обновляет v.grid / v.bars. Куски на столе не трогает — после сдвига ALIGN заново.
+    static bool moveDownbeat (Version&, double beats, juce::String& error);
     // Темп песни: заданный в проекте или темп образца барабанов (по его долям).
     static double songBpm (const Project&);
     // TEMPO ANALYSE: темп каждого куска и предложение.

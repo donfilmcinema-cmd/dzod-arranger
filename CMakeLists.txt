@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.22)
-project(DZODArranger VERSION 0.6.2 LANGUAGES C CXX)
+project(DZODArranger VERSION 0.7.0 LANGUAGES C CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -41,7 +41,7 @@ set_target_properties(DZODShine PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
 # ядро Arranger (+ Stemmer core) без окна
 set(ARRANGER_CORE
-  core/Arranger.cpp core/Match.cpp core/Stretch.cpp
+  core/Arranger.cpp core/Match.cpp core/Stretch.cpp core/Phase.cpp
   third_party/stemmer/DzodStemmer.cpp third_party/stemmer/Mp3Writer.cpp)
 
 add_executable(ArrangerTool tools/ArrangerTool.cpp ${ARRANGER_CORE})

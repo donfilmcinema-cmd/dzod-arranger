@@ -22,6 +22,10 @@ static void printVersion (const Version& v)
     out (v.id + ": " + juce::String (v.lengthSec, 1) + " s, tempo " + juce::String (v.bpm, 2) + " (" + juce::String (v.bpmMin, 1) + ".." + juce::String (v.bpmMax, 1)
          + "), bars " + juce::String ((int) v.bars.size()) + ", first bar " + juce::String (v.bars.empty() ? 0.0 : v.bars[0], 3) + " s, key " + v.key.name()
          + " (" + juce::String (v.key.confidence, 2) + ")");
+    if (v.phase.checked)
+        out ("    phase: kick on/off " + juce::String (v.phase.kickOnDb, 1) + "/" + juce::String (v.phase.kickOffDb, 1) + " dB, snare on/off " + juce::String (v.phase.snareOnDb, 1) + "/" + juce::String (v.phase.snareOffDb, 1)
+             + " dB, bar phase scores " + juce::String (v.phase.phaseScore[0], 1) + " " + juce::String (v.phase.phaseScore[1], 1) + " " + juce::String (v.phase.phaseScore[2], 1) + " " + juce::String (v.phase.phaseScore[3], 1)
+             + ", chosen " + juce::String (v.phase.barPhase) + (v.phase.barChanged ? " (changed)" : "") + (v.phase.halfShifted ? " HALF-SHIFTED" : "") + ", kick on beats " + juce::String (v.phase.kickOnBeatsPct, 0) + " %");
     for (auto& s : v.stems)
         out ("    " + s.file.getFileName() + "  ->  " + s.outRole + "  " + juce::String (s.lufs, 1) + " LUFS" + (s.silent ? "  (почти пусто)" : ""));
     for (auto& sc : v.sections)
@@ -590,6 +594,76 @@ int main (int argc, char** argv)
         }
         out ("regressions: " + juce::String (n - bad) + "/" + juce::String (n) + " passed");
         return bad == 0 ? 0 : 7;
+    }
+    if (cmd == "phasetest" && argc >= 4)
+    {   // синтетический метал: бочка на 1 и 3, малый на 2 и 4, хай-хэт восьмыми, crash на «раз»; сдвиг начала как у Suno
+        const juce::File dst (juce::String::fromUTF8 (argv[2])), cache (juce::String::fromUTF8 (argv[3]));
+        int n = 0, bad = 0;
+        auto check = [&] (bool c, const juce::String& what, const juce::String& d = {}) { ++n; if (! c) ++bad; out (juce::String (c ? "PASS  " : "FAIL  ") + what + (d.isNotEmpty() ? "   [" + d + "]" : juce::String())); };
+        for (double bpm : { 188.0, 94.0, 140.0 })
+            for (double lead : { 0.0, 0.37 })
+            {
+                const double sr = 48000, beat = 60.0 / bpm; const int bars = 48;
+                const int len = (int) ((lead + bars * 4 * beat + 2) * sr);
+                juce::AudioBuffer<float> b (2, len); b.clear();
+                juce::Random rnd (7);
+                auto add = [&] (double t, int kind)
+                {
+                    const int s0 = (int) (t * sr);
+                    for (int i = 0; i < (int) (0.4 * sr) && s0 + i < len; ++i)
+                    {
+                        const double x = i / sr; float v = 0;
+                        if (kind == 0) v = (float) (0.9 * std::sin (2 * juce::MathConstants<double>::pi * (55 + 60 * std::exp (-x * 40)) * x) * std::exp (-x * 18));   // бочка
+                        if (kind == 1) v = (float) ((0.5 * std::sin (2 * juce::MathConstants<double>::pi * 220 * x) + 0.5 * (rnd.nextFloat() * 2 - 1)) * std::exp (-x * 25));  // малый
+                        if (kind == 2) v = (float) (0.15 * (rnd.nextFloat() * 2 - 1) * std::exp (-x * 120));   // хай-хэт
+                        if (kind == 3) v = (float) (0.35 * (rnd.nextFloat() * 2 - 1) * std::exp (-x * 4));     // crash
+                        b.addSample (0, s0 + i, v); b.addSample (1, s0 + i, v);
+                    }
+                };
+                for (int k = 0; k < bars * 4; ++k)
+                {
+                    const double t0 = lead + k * beat;
+                    if (k % 2 == 0) add (t0, 0); else add (t0, 1);
+                    add (t0, 2); add (t0 + beat / 2, 2);
+                    if (k % 16 == 0) add (t0, 3);
+                }
+                // «бас» на первой доле каждого такта (чтобы версия была не из одних барабанов)
+                juce::AudioBuffer<float> bass (2, len); bass.clear();
+                for (int k = 0; k < bars; ++k) { const int s0 = (int) ((lead + k * 4 * beat) * sr); for (int i = 0; i < (int) (beat * 4 * sr) && s0 + i < len; ++i) { const float v = (float) (0.3 * std::sin (2 * juce::MathConstants<double>::pi * 82.4 * i / sr)); bass.setSample (0, s0 + i, v); bass.setSample (1, s0 + i, v); } }
+                const auto folder = dst.getChildFile ("metal " + juce::String (bpm, 0) + " lead " + juce::String (lead, 2)); folder.deleteRecursively(); folder.createDirectory();
+                for (auto [buf, name] : { std::make_pair (&b, "Synth (Drums).wav"), std::make_pair (&bass, "Synth (Bass).wav") })
+                {
+                    juce::WavAudioFormat wav; std::unique_ptr<juce::AudioFormatWriter> w (wav.createWriterFor (new juce::FileOutputStream (folder.getChildFile (name)), sr, 2, 24, {}, 0));
+                    w->writeFromAudioSampleBuffer (*buf, 0, len);
+                }
+                auto v = Engine::scanVersion (folder); juce::String e;
+                if (! Engine::analyseVersion (v, cache, nullptr, e)) { check (false, folder.getFileName() + ": analysed", e); continue; }
+                const auto m = measurePhase (b, sr, v.grid, v.bars);
+                // первый такт — на первом ударе бочки + crash (lead)
+                const double firstBar = v.bars.empty() ? -1 : v.bars[0];
+                const double barLen = 4 * 60.0 / v.bpm;
+                const double off = std::fmod (firstBar - lead + 1000 * 4 * beat, 4 * beat);
+                const double offMs = juce::jmin (off, 4 * beat - off) * 1000;
+                check (m.kickOnBeatsPct >= 80, folder.getFileName() + ": kick on the beats in >= 80 % of bars", juce::String (m.kickOnBeatsPct, 0) + " %, " + juce::String (v.bpm, 1) + " BPM"
+                       + (v.phase.halfShifted ? ", grid shifted by half a beat" : "") + (v.phase.barChanged ? ", bars by kick+crash" : ""));
+                check (offMs < 30 || std::abs (barLen - 2 * 4 * beat) < 0.05 && std::fmod (off, 4 * beat) < 0.03, folder.getFileName() + ": bar 1 = kick + crash", "first bar " + juce::String (firstBar, 3) + " s, off by " + juce::String (offMs, 0) + " ms");
+            }
+        {   // ручной сдвиг сильной доли: на полдоли и обратно — сетка как была
+            auto v = Engine::scanVersion (dst.getChildFile ("metal 188 lead 0.37")); juce::String e;
+            Engine::analyseVersion (v, cache, nullptr, e);
+            const auto g = v.grid; const auto b0 = v.bars;
+            const bool a1 = Engine::moveDownbeat (v, 0.5, e);
+            auto v2 = Engine::scanVersion (dst.getChildFile ("metal 188 lead 0.37")); Engine::analyseVersion (v2, cache, nullptr, e);
+            const bool kept = std::abs (v2.grid[1] - v.grid[1]) < 1e-6;
+            const bool a2 = Engine::moveDownbeat (v, -0.5, e);
+            double dmax = 0; for (size_t i = 0; i < juce::jmin (g.size(), v.grid.size()) && i < 40; ++i) dmax = juce::jmax (dmax, std::abs (g[i + (v.grid.size() < g.size() ? 1 : 0)] - v.grid[i]));
+            check (a1 && a2 && kept, "moveDownbeat: half a beat later is saved in the cache (reopen keeps it), and back", e);
+            const bool a3 = Engine::moveDownbeat (v, 1, e);
+            check (a3 && v.bars.size() >= 2 && std::abs ((v.bars[1] - v.bars[0]) - (b0[1] - b0[0])) < 0.05, "moveDownbeat: bar start one beat later", e);
+            Engine::moveDownbeat (v, -1, e);
+        }
+        out ("phasetest: " + juce::String (n - bad) + "/" + juce::String (n) + " passed");
+        return bad == 0 ? 0 : 8;
     }
     if (cmd == "verify" && argc >= 4)
     {

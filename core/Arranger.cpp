@@ -1,6 +1,7 @@
 #include "Arranger.h"
 #include "../third_party/stemmer/Mp3Writer.h"
 #include "Stretch.h"
+#include "Phase.h"
 #include <algorithm>
 #include <cmath>
 #include <set>
@@ -575,8 +576,8 @@ bool Engine::analyseVersion (Version& v, const juce::File& cacheDir, Progress pr
     // ключ кэша — файлы и роли (одинаковые id «V1» у разных песен не путаются)
     juce::String key; for (auto& s : v.stems) key << s.file.getFullPathName() << "|" << s.file.getSize() << "|" << s.file.getLastModificationTime().toMilliseconds() << "|" << s.role << ";";
     const auto base = juce::File::createLegalFileName (v.id) + "_" + juce::String::toHexString (key.hashCode64());
-    const auto cache = cacheDir.getChildFile (base + "_dzod_stemmer_v2.json");
-    const auto meta = cacheDir.getChildFile (base + "_meta_v1.json");
+    const auto cache = cacheDir.getChildFile (base + "_dzod_stemmer_v4.json");
+    const auto meta = cacheDir.getChildFile (base + "_meta_v3.json");
     if (cache.existsAsFile() && meta.existsAsFile() && readMeta (v, meta))
     {   // быстрый путь: версия уже разбиралась — звук не читаем
         Stemmer st;
@@ -648,6 +649,26 @@ bool Engine::analyseVersion (Version& v, const juce::File& cacheDir, Progress pr
         tmp.deleteFile();
         if (! ok) { error = st.lastError(); return false; }
         st.writeAnalysis (cache, st.analysis().autoShift, 0, "DZOD Arranger");
+        // фаза сетки по звуку барабанов (sound 31.10, THIN AS PAPER: бочка на «и» — сетка на 1/8 мимо): при явном перевесе — поправить в кэше
+        {
+            say (0.8f, juce::String ("Checking the strong beat: ") + v.id);
+            const juce::AudioBuffer<float>* d = &sum;
+            for (size_t i = 0; i < v.stems.size(); ++i) if (v.stems[i].role == "drums" && ! v.stems[i].silent) d = &bufs[i];
+            auto grid = st.analysis().grid; auto bars = st.analysis().bars;
+            const auto g0 = grid.size();
+            v.phase = checkPhase (*d, sr, grid, bars, st.analysis().musicStart);
+            if (v.phase.halfShifted || v.phase.barChanged || grid.size() != g0)
+            {
+                auto j = juce::JSON::parse (cache.loadFileAsString());
+                if (auto* o = j.getDynamicObject())
+                {
+                    o->setProperty ("grid", arr (grid)); o->setProperty ("bars", arr (bars));
+                    o->setProperty ("arrangerPhase", juce::String (v.phase.halfShifted ? "half-beat shifted; " : "") + (v.phase.barChanged ? "bars by kick+crash" : ""));
+                    cache.replaceWithText (juce::JSON::toString (j));
+                    if (! st.readAnalysis (cache)) { error = st.lastError(); return false; }
+                }
+            }
+        }
     }
     if (isCancelled (cancel)) { error = juce::String ("Cancelled"); return false; }
     const auto& A = st.analysis();
@@ -662,6 +683,45 @@ bool Engine::analyseVersion (Version& v, const juce::File& cacheDir, Progress pr
     v.analysed = true;
     writeMeta (v, meta);
     say (1.0f, juce::String ("Ready: ") + v.id);
+    return true;
+}
+
+bool Engine::moveDownbeat (Version& v, double beats, juce::String& error)
+{
+    if (! v.analysed || v.grid.size() < 4) { error = "The variant is not analysed"; return false; }
+    auto grid = v.grid; auto bars = v.bars;
+    if (std::abs (std::abs (beats) - 0.5) < 1e-6)
+    {   // полдоли: каждая доля и каждый такт — на середину до соседней доли
+        auto half = [&] (double t)
+        {
+            int i = 0; while (i + 1 < (int) v.grid.size() && v.grid[(size_t) i + 1] <= t + 1e-6) ++i;
+            const double d = i + 1 < (int) v.grid.size() ? v.grid[(size_t) i + 1] - v.grid[(size_t) i] : v.grid[(size_t) i] - v.grid[(size_t) i - 1];
+            return t + (beats > 0 ? d / 2 : -d / 2);
+        };
+        grid.clear(); for (double t : v.grid) { const double x = half (t); if (x >= 0) grid.push_back (x); }
+        bars.clear(); for (double t : v.bars) { const double x = half (t); if (x >= 0) bars.push_back (x); }
+    }
+    else
+    {   // начало такта — на k долей позже/раньше
+        const int k = (int) std::lround (beats);
+        bars.clear();
+        for (double t : v.bars)
+        {
+            int i = 0; for (int j = 0; j < (int) v.grid.size(); ++j) if (std::abs (v.grid[(size_t) j] - t) < std::abs (v.grid[(size_t) i] - t)) i = j;
+            const int j = i + k; if (j >= 0 && j < (int) v.grid.size()) bars.push_back (v.grid[(size_t) j]);
+        }
+        // первый такт мог уйти: добавить такт раньше, если хватает долей
+        if (! bars.empty()) { int i = 0; for (int j = 0; j < (int) grid.size(); ++j) if (std::abs (grid[(size_t) j] - bars[0]) < 1e-6) i = j; if (i >= 4) bars.insert (bars.begin(), grid[(size_t) i - 4]); }
+    }
+    if (bars.size() < 2) { error = "Nothing left of the grid after the shift"; return false; }
+    auto j = juce::JSON::parse (v.analysisFile.loadFileAsString());
+    auto* o = j.getDynamicObject();
+    if (o == nullptr) { error = "Cannot read " + v.analysisFile.getFullPathName(); return false; }
+    o->setProperty ("grid", arr (grid)); o->setProperty ("bars", arr (bars));
+    o->setProperty ("arrangerPhase", "moved by the author: " + juce::String (beats) + " beat(s)");
+    if (! v.analysisFile.replaceWithText (juce::JSON::toString (j))) { error = "Cannot write " + v.analysisFile.getFullPathName(); return false; }
+    v.grid = grid; v.bars = bars;
+    v.phase.halfShifted = v.phase.halfShifted != (std::abs (std::abs (beats) - 0.5) < 1e-6);
     return true;
 }
 

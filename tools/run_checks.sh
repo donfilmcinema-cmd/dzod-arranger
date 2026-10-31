@@ -8,6 +8,7 @@ rm -rf "$W"; mkdir -p "$W"
 "$T" regress "$R" "$C" "$W/regress" > "$W/regress.txt" 2>&1; s2=$?
 "$T" audit "$R" "$RU" "$SONGS" "$C" "$W/audit" > "$W/audit.txt" 2>&1; s3=$?
 "$T" stress "$R" "$C" "$W/stress" 4 > "$W/stress.txt" 2>&1; s4=$?
-grep -E "^selftest" "$W/selftest.txt"; grep -E "^regressions" "$W/regress.txt"; grep -E "^audit" "$W/audit.txt"; grep -cE "^seed .*: OK" "$W/stress.txt" | sed 's/^/stress OK: /'
+"$T" phasetest "$W/phase" "$W/phase-cache" > "$W/phase.txt" 2>&1; s5=$?
+grep -E "^selftest" "$W/selftest.txt"; grep -E "^regressions" "$W/regress.txt"; grep -E "^audit" "$W/audit.txt"; grep -cE "^seed .*: OK" "$W/stress.txt" | sed 's/^/stress OK: /'; grep -E "^phasetest" "$W/phase.txt"
 grep -hE "FAIL" "$W"/*.txt
-[ $s1 -eq 0 ] && [ $s2 -eq 0 ] && [ $s3 -eq 0 ] && [ $s4 -eq 0 ] && echo "ALL CHECKS PASSED" || { echo "CHECKS FAILED - do not ship"; exit 1; }
+[ $s1 -eq 0 ] && [ $s2 -eq 0 ] && [ $s3 -eq 0 ] && [ $s4 -eq 0 ] && [ $s5 -eq 0 ] && echo "ALL CHECKS PASSED" || { echo "CHECKS FAILED - do not ship"; exit 1; }
