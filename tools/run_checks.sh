@@ -1,11 +1,11 @@
 #!/bin/bash
 # Все проверки движка Arranger перед сборкой (правило «ничего не возвращается», sound 30.10).
-# ./tools/run_checks.sh <DZODArrangerTool> <rigor-suno-versions-2026-10-25> <папка «аудит» с русской копией 04B> <song-sections-2026-10-25> <кэш> <рабочая папка>
+# ./tools/run_checks.sh <DZODArrangerTool> <rigor-suno-versions-2026-10-25> <папка «аудит» с русской копией 04B> <song-sections-2026-10-25> <кэш> <рабочая папка> [THIN AS PAPER Neuro Drums.flac]
 set -u
-T="$1"; R="$2"; RU="$3"; SONGS="$4"; C="$5"; W="$6"
+T="$1"; R="$2"; RU="$3"; SONGS="$4"; C="$5"; W="$6"; THIN="${7:-}"
 rm -rf "$W"; mkdir -p "$W"
 "$T" selftest > "$W/selftest.txt" 2>&1;            s1=$?
-"$T" regress "$R" "$C" "$W/regress" > "$W/regress.txt" 2>&1; s2=$?
+"$T" regress "$R" "$C" "$W/regress" ${THIN:+"$THIN"} > "$W/regress.txt" 2>&1; s2=$?
 "$T" audit "$R" "$RU" "$SONGS" "$C" "$W/audit" > "$W/audit.txt" 2>&1; s3=$?
 "$T" stress "$R" "$C" "$W/stress" 4 > "$W/stress.txt" 2>&1; s4=$?
 "$T" phasetest "$W/phase" "$W/phase-cache" > "$W/phase.txt" 2>&1; s5=$?

@@ -592,6 +592,22 @@ int main (int argc, char** argv)
             check ("R3", ok3 && worstL < 2.0, "Unify brings a slice 6 dB quieter back to the reference loudness (+-2 dB)", juce::String (worstL, 1) + " dB");
             check ("R3", ok3 && worstH > 3.0, "Unify brings back the highs of a dull slice (4-12 kHz cut by 6 dB: at least +3 dB back)", "+" + juce::String (worstH, 1) + " dB");
         }
+        // R11 31.10 THIN AS PAPER: бочка на «и», малый на долях (сильная доля на 1/8 мимо) — настоящий стем (выход Arranger 0.6.2, 95 BPM, «до»)
+        if (argc >= 6)
+        {
+            const juce::File thin (juce::String::fromUTF8 (argv[5]));
+            const auto dir = dst.getChildFile ("THIN"); dir.deleteRecursively(); dir.createDirectory();
+            thin.copyFileTo (dir.getChildFile ("THIN AS PAPER (Drums).flac"));
+            const auto c2 = dst.getChildFile ("THIN cache"); c2.deleteRecursively();
+            auto v = Engine::scanVersion (dir);
+            const bool okA = Engine::analyseVersion (v, c2, nullptr, e);
+            juce::AudioBuffer<float> b; double sr = 0; Stemmer::loadAudio (dir.getChildFile ("THIN AS PAPER (Drums).flac"), b, sr, e);
+            const auto m = measurePhase (b, sr, v.grid, v.bars);
+            check ("R11", okA && v.phase.halfShifted, "THIN AS PAPER: grid moved by half a beat (kick was on the 'and')",
+                   "kick on/off before " + juce::String (v.phase.kickOnDb, 1) + "/" + juce::String (v.phase.kickOffDb, 1) + " dB");
+            check ("R11", okA && m.kickOnBeatsPct >= 65, "THIN AS PAPER: kick on the beats in >= 65 % of bars (exact shifted grid gives 77 %, before 26 %)", juce::String (m.kickOnBeatsPct, 0) + " %");
+        }
+        else out ("SKIP  R11  (no THIN AS PAPER drums file given)");
         out ("regressions: " + juce::String (n - bad) + "/" + juce::String (n) + " passed");
         return bad == 0 ? 0 : 7;
     }
