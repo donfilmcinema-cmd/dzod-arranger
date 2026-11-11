@@ -1,0 +1,68 @@
+MSBuild version 18.11.1-1.26513.3+940033be3 for .NET Framework
+
+  1>Checking Build System
+  Building Custom Rule D:/a/dzod-arranger/dzod-arranger/CMakeLists.txt
+  juce_core.cpp
+  Building Custom Rule D:/a/dzod-arranger/dzod-arranger/CMakeLists.txt
+  bitstream.c
+  huffman.c
+  l3bitstream.c
+  l3loop.c
+  l3mdct.c
+  l3subband.c
+  layer3.c
+  reservoir.c
+  tables.c
+  Generating Code...
+  DZODShine.vcxproj -> D:\a\dzod-arranger\dzod-arranger\build\Release\DZODShine.lib
+  juce_core_CompilationTime.cpp
+  juce_events.cpp
+  juce_data_structures.cpp
+  juce_graphics.cpp
+  juce_graphics_Harfbuzz.cpp
+  juce_gui_basics.cpp
+D:\a\dzod-arranger\dzod-arranger\build\_deps\juce-src\modules\juce_gui_basics\juce_gui_basics.cpp(61): warning : This version of JUCE does not use the splash screen, the flag JUCE_DISPLAY_SPLASH_SCREEN is ignored [D:\a\dzod-arranger\dzod-arranger\build\DZODJuceGui.vcxproj]
+  juce_audio_basics.cpp
+  juce_audio_formats.cpp
+  juce_audio_devices.cpp
+  juce_dsp.cpp
+  Generating Code...
+  juce_graphics_Sheenbidi.c
+  DZODJuceGui.vcxproj -> D:\a\dzod-arranger\dzod-arranger\build\Release\DZODJuceGui.lib
+  Embedding fonts
+  Building Custom Rule D:/a/dzod-arranger/dzod-arranger/CMakeLists.txt
+  Main.cpp
+  ArrangerComponent.cpp
+  TableView.cpp
+  Player.cpp
+  Theme.cpp
+  AppFonts.cpp
+  Arranger.cpp
+  Match.cpp
+  Stretch.cpp
+  Phase.cpp
+  DzodStemmer.cpp
+  Mp3Writer.cpp
+  Generating Code...
+  ArrangerApp.vcxproj -> D:\a\dzod-arranger\dzod-arranger\build\Release\DZOD Arranger.exe
+MSBuild version 18.11.1-1.26513.3+940033be3 for .NET Framework
+
+  Building Custom Rule D:/a/dzod-arranger/dzod-arranger/CMakeLists.txt
+  DZODShine.vcxproj -> D:\a\dzod-arranger\dzod-arranger\build\Release\DZODShine.lib
+  juce_core.cpp
+  juce_core_CompilationTime.cpp
+  juce_audio_basics.cpp
+  juce_audio_formats.cpp
+  juce_dsp.cpp
+  Generating Code...
+  DZODJuceAudio.vcxproj -> D:\a\dzod-arranger\dzod-arranger\build\Release\DZODJuceAudio.lib
+  Building Custom Rule D:/a/dzod-arranger/dzod-arranger/CMakeLists.txt
+  ArrangerTool.cpp
+  Arranger.cpp
+  Match.cpp
+  Stretch.cpp
+  Phase.cpp
+  DzodStemmer.cpp
+  Mp3Writer.cpp
+  Generating Code...
+  ArrangerTool.vcxproj -> D:\a\dzod-arranger\dzod-arranger\build\Release\DZODArrangerTool.exe
