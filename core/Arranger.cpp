@@ -11,6 +11,7 @@ namespace dzod
 {
 namespace arranger
 {
+static const char* kEngineVersion = "0.8.0";
 using stemmer::Stemmer;
 
 namespace
@@ -1080,6 +1081,36 @@ bool Engine::mixIntoStems (Project& P, const juce::File& cacheDir, const juce::F
         outFolder.getChildFile ("dzod_stems.json").replaceWithText (juce::JSON::toString (juce::var (m)));
     }
 
+    // карта для Make Drums (drummer 1.0.62, решение автора 11.11): по каждому куску Drums — исходный стем версии,
+    // откуда–докуда, куда в собранном стеме и точки ALIGN [исходник, стем] на каждой доле; Drummer слушает исходник, а не растянутый стем
+    if (rolesPresent.count ("drums") && outFolder.getChildFile (neuroName ("drums") + ".wav").existsAsFile())
+    {
+        auto* dm = new juce::DynamicObject();
+        dm->setProperty ("format", 1); dm->setProperty ("writer", juce::String ("DZOD Arranger ") + kEngineVersion); dm->setProperty ("bpm", bpm);
+        juce::Array<juce::var> items;
+        const double beat = 60.0 / bpm;
+        for (auto& p : pl)
+        {
+            if (! P.isOn (p.pc, "drums")) continue;
+            juce::File src;
+            for (auto& s : p.v->stems) if (s.outRole == "drums" && ! s.silent) { src = s.file; break; }
+            if (src == juce::File()) continue;
+            const double vsr = p.v->sampleRate > 0 ? p.v->sampleRate : 48000.0;
+            auto srcAt = [&] (double tau) { const double m = tau * vsr / handle; const int m0 = (int) std::floor (m); const double a0 = p.map (m0), a1 = p.map (m0 + 1); return a0 + (a1 - a0) * (m - m0); };
+            auto* o = new juce::DynamicObject();
+            o->setProperty ("source", src.getFullPathName().replaceCharacter ('\\', '/'));
+            o->setProperty ("srcStart", p.a); o->setProperty ("srcEnd", p.b);
+            o->setProperty ("dstStart", p.at); o->setProperty ("dstEnd", p.at + p.dur);
+            juce::Array<juce::var> pts;
+            for (int k = 0; k * beat < p.dur - 1e-6; ++k) { juce::Array<juce::var> xy; xy.add (srcAt (k * beat)); xy.add (p.at + k * beat); pts.add (xy); }
+            { juce::Array<juce::var> xy; xy.add (p.b); xy.add (p.at + p.dur); pts.add (xy); }
+            o->setProperty ("map", pts);
+            items.add (juce::var (o));
+        }
+        dm->setProperty ("pieces", items);
+        outFolder.getChildFile (neuroName ("drums") + ".dzmap.json").replaceWithText (juce::JSON::toString (juce::var (dm)));
+    }
+
     auto* R = new juce::DynamicObject();
     R->setProperty ("songBpm", bpm);
     R->setProperty ("lengthSec", total);
@@ -1254,6 +1285,9 @@ bool Engine::saveStems (const juce::File& stemsFolder, const juce::File& destRoo
         dst.getParentDirectory().createDirectory();
         if (! files[i].copyFileTo (dst)) { error = juce::String ("Could not write ") + dst.getFullPathName(); return false; }
         written.add (dst.getFullPathName());
+        // карта Make Drums едет со стемом барабанов (то же имя, .dzmap.json)
+        const auto dzmap = files[i].withFileExtension (".dzmap.json");
+        if (dzmap.existsAsFile()) dzmap.copyFileTo (dst.withFileExtension (".dzmap.json"));
         folderOut = dst.getParentDirectory();
     }
     // паспорт рядом со стемами — с новыми именами файлов

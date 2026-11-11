@@ -592,6 +592,53 @@ int main (int argc, char** argv)
             check ("R3", ok3 && worstL < 2.0, "Unify brings a slice 6 dB quieter back to the reference loudness (+-2 dB)", juce::String (worstL, 1) + " dB");
             check ("R3", ok3 && worstH > 3.0, "Unify brings back the highs of a dull slice (4-12 kHz cut by 6 dB: at least +3 dB back)", "+" + juce::String (worstH, 1) + " dB");
         }
+        // R12 11.11 «барабаны после Arranger хуже, чем после Stemmer» (Make Drums слушал растянутый стем) — карта Neuro Drums.dzmap.json
+        if (ok)
+        {
+            const auto j = juce::JSON::parse (o.getChildFile ("Neuro Drums.dzmap.json").loadFileAsString());
+            auto* ps = j["pieces"].getArray();
+            bool shape = ps != nullptr && ps->size() == 5 && (double) j["bpm"] > 0;
+            double prevEnd = -1; bool noOverlap = true, rising = true; int points = 0;
+            std::vector<double> lags;
+            juce::AudioBuffer<float> outB; double sr = 0; Stemmer::loadAudio (o.getChildFile ("Neuro Drums.wav"), outB, sr, e);
+            if (shape)
+                for (auto& pc : *ps)
+                {
+                    noOverlap &= (double) pc["dstStart"] >= prevEnd - 1e-6; prevEnd = (double) pc["dstEnd"];
+                    juce::AudioBuffer<float> sb; double ssr = 0; Stemmer::loadAudio (juce::File (pc["source"].toString()), sb, ssr, e);
+                    double lastS = -1, lastD = -1;
+                    if (auto* mp = pc["map"].getArray())
+                        for (int k = 0; k < mp->size(); k += 4)          // каждая 4-я доля: где удар в исходнике — там удар в стеме
+                        {
+                            const double s = (double) (*mp)[k][0], d = (double) (*mp)[k][1];
+                            rising &= s > lastS && d > lastD; lastS = s; lastD = d; ++points;
+                            if (d < (double) pc["dstStart"] + 0.1 || d > (double) pc["dstEnd"] - 0.3) continue;
+                            // взаимная корреляция огибающих ±20 мс
+                            const int w = (int) (0.12 * sr); double best = -1; int bl = 0;
+                            for (int lag = -(int) (0.02 * sr); lag <= (int) (0.02 * sr); lag += 24)
+                            {
+                                double c = 0, na = 0, nb = 0;
+                                for (int i = 0; i < w; i += 4)
+                                {
+                                    const int io = (int) (d * sr) + i + lag, is = (int) (s * ssr) + (int) (i * ssr / sr);
+                                    if (io < 0 || io >= outB.getNumSamples() || is < 0 || is >= sb.getNumSamples()) continue;
+                                    const double x = std::abs (outB.getSample (0, io)), y = std::abs (sb.getSample (0, is));
+                                    c += x * y; na += x * x; nb += y * y;
+                                }
+                                const double r = c / std::sqrt (na * nb + 1e-12);
+                                if (r > best) { best = r; bl = lag; }
+                            }
+                            if (best > 0.3) lags.push_back (std::abs (bl / sr * 1000.0));
+                        }
+                }
+            std::sort (lags.begin(), lags.end());
+            const double p90 = lags.empty() ? 99 : lags[lags.size() * 9 / 10];
+            check ("R12", shape && noOverlap && rising, "Neuro Drums.dzmap.json: 5 slices, no overlap, map points rising", juce::String (points) + " points");
+            check ("R12", ! lags.empty() && p90 < 8.0, "map: a hit at the source point is a hit at the stem point (p90 < 8 ms)", juce::String (p90, 1) + " ms, " + juce::String ((int) lags.size()) + " checks");
+            juce::StringArray w2;
+            Engine::saveStems (o, dst.getChildFile ("saved"), "{song} - Neuro {instrument}.wav", "Song", w2, e);
+            check ("R12", dst.getChildFile ("saved").getChildFile ("Song - Neuro Drums.dzmap.json").existsAsFile(), "SAVE NEW STEMS copies the map next to the drums stem");
+        }
         // R11 31.10 THIN AS PAPER: бочка на «и», малый на долях (сильная доля на 1/8 мимо) — настоящий стем (выход Arranger 0.6.2, 95 BPM, «до»)
         if (argc >= 6)
         {
