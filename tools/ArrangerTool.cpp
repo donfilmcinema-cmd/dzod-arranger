@@ -483,6 +483,24 @@ int main (int argc, char** argv)
         out ("audit: " + juce::String (n) + " checks, " + juce::String (bad) + " failed");
         return bad == 0 ? 0 : 6;
     }
+    if (cmd == "gridfit" && argc >= 4)
+    {   // проверка на файлах автора (sound 15.11 21:50): gridfit <стем барабанов> <кэш dzod_stemmer_vN.json> — ровная ли песня, где сетка трекера ломалась
+        juce::AudioBuffer<float> b; double sr = 0; juce::String e;
+        if (! Stemmer::loadAudio (juce::File (juce::String::fromUTF8 (argv[2])), b, sr, e)) { out ("error: " + e); return 1; }
+        auto j = juce::JSON::parse (juce::File (juce::String::fromUTF8 (argv[3])).loadFileAsString());
+        std::vector<double> g, bars;
+        if (auto* a = j["grid"].getArray()) for (auto& x : *a) g.push_back ((double) x);
+        if (auto* a = j["bars"].getArray()) for (auto& x : *a) bars.push_back ((double) x);
+        const auto g0 = g; std::vector<int> fb;
+        const auto F = fitSteadyGrid (b, sr, g, bars, fb);
+        out ("steady: " + juce::String (F.steady ? "yes" : "no") + ", period " + juce::String (F.period, 7) + " s (" + juce::String (F.period > 0 ? 60.0 / F.period : 0.0, 4) + " BPM), worst 8 s window " + juce::String (F.worstWindowMs, 1) + " ms, windows " + juce::String (F.windows) + ", hits " + juce::String (F.hits));
+        if (! F.steady) { std::vector<int> fb2; auto g2 = g0, b2 = bars; regularizeGrid (g2, b2, fb2); fb = fb2; }
+        juce::StringArray s; for (int x : fb) s.add (juce::String (x));
+        if (juce::SystemStats::getEnvironmentVariable ("DZOD_GRIDFIT_DEBUG", {}).isNotEmpty()) for (auto& l : steadyFitDebug()) out (l);
+        out ("bars fixed: " + (s.isEmpty() ? juce::String ("none") : s.joinIntoString (",")));
+        out ("beats: " + juce::String ((int) g0.size()) + " -> " + juce::String ((int) g.size()) + ", first bar " + (bars.empty() ? juce::String ("-") : juce::String (bars[0], 5)));
+        return 0;
+    }
     if (cmd == "regress" && argc >= 5)
     {   // регрессии: жалобы автора, которые были исправлены, — каждая своим тестом (правило sound 30.10)
         const juce::File rigor (juce::String::fromUTF8 (argv[2])), cache (juce::String::fromUTF8 (argv[3])), dst (juce::String::fromUTF8 (argv[4]));
@@ -680,6 +698,56 @@ int main (int argc, char** argv)
             check ("R13", ! regularizeGrid (lg, lb, fb2), "live tempo (120 -> 132 BPM, +-8 ms) is left as it is", juce::String ((int) fb2.size()) + " bars touched");
             int touched = 0; for (auto& v : vs) touched += (int) v.gridFixedBars.size();
             check ("R13", touched == 0, "RIGOR 04A-04D: beat grids not touched by the beat count", juce::String (touched) + " bars");
+        }
+        // R14 15.11 21:50 AFTP после 0.9.0: «между 56 и 57 баром далеко не попала» — местный ремонт взял период из окна со сбоем (0,4326 вместо 0,4348).
+        // Ровная песня 138,000 BPM (барабаны синтезом), сетка трекера как v5: лишняя доля в тактах 53–58, пол-доли в 62–65.
+        {
+            const double sr = 44100, P = 60.0 / 138.0, T0 = 0.93009; const int beats = 4 * 74 + 1;
+            juce::AudioBuffer<float> dr (2, (int) ((T0 + beats * P + 1) * sr)); dr.clear();
+            juce::Random rnd (3); std::vector<double> snares;
+            for (int k = 0; k < beats; ++k)
+            {
+                const double tb = T0 + k * P; const bool snare = (k % 2) == 1;
+                if (snare) snares.push_back (tb);
+                const int s0 = (int) std::lround (tb * sr);
+                for (int i = 0; i < (int) (0.12 * sr) && s0 + i < dr.getNumSamples(); ++i)
+                {
+                    const double x = i / sr; float v;
+                    if (snare) v = (float) (std::exp (-x * 30) * (0.6 * std::sin (2 * juce::MathConstants<double>::pi * 220 * x) + 0.5 * (rnd.nextFloat() * 2 - 1)));
+                    else       v = (float) (std::exp (-x * 25) * std::sin (2 * juce::MathConstants<double>::pi * 60 * x));
+                    for (int c = 0; c < 2; ++c) dr.addSample (c, s0 + i, 0.8f * v);
+                }
+                // хай-хэт на восьмых
+                for (int h = 0; h < 2; ++h) { const int s1 = (int) std::lround ((tb + h * P / 2) * sr); for (int i = 0; i < (int) (0.03 * sr) && s1 + i < dr.getNumSamples(); ++i) for (int c = 0; c < 2; ++c) dr.addSample (c, s1 + i, (float) (0.15 * std::exp (-i / sr * 120) * (rnd.nextFloat() * 2 - 1))); }
+            }
+            std::vector<double> g, b;
+            for (int k = 0; k <= 4 * 52; ++k) g.push_back (T0 + k * P);
+            { const double a = g.back(); for (int k = 1; k <= 25; ++k) g.push_back (a + 24 * P * k / 25.0); }      // такты 53–58: 25 долей на месте 24
+            { const double a = g.back(); for (int k = 1; k <= 4 * 3; ++k) g.push_back (a + k * P); }                 // 59–61 ровно (сдвиг на долю остался)
+            { const double a = g.back(); for (int k = 1; k <= 8; ++k) g.push_back (a + k * 0.40); const double c = g.back(); for (int k = 1; k <= 8; ++k) g.push_back (c + k * (16 * P + 0.5 * P - 8 * 0.40) / 8); }  // 62–65: пол-доли
+            { const double a = g.back(); while (g.back() < T0 + (beats - 1) * P - 0.3 * P) g.push_back (g.back() + P); (void) a; }
+            for (size_t k = 0; k < g.size(); k += 4) b.push_back (g[k]);
+            std::vector<int> fb;
+            const auto F = fitSteadyGrid (dr, sr, g, b, fb);
+            double worst = 0; int worstBar = 0;
+            for (double s : snares)
+            {
+                double best = 1e9; for (double x : g) best = juce::jmin (best, std::abs (x - s));
+                if (best > worst) { worst = best; worstBar = (int) ((s - T0) / (4 * P)) + 1; }
+            }
+            check ("R14", F.steady && std::abs (F.period - P) < 2e-6, "steady 138.000 BPM song: grid is one straight line through the hits (period by the whole song)",
+                   "period " + juce::String (F.period, 7) + " s, worst 8 s window " + juce::String (F.worstWindowMs, 1) + " ms");
+            check ("R14", worst < 0.005, "snare on the grid +-5 ms in every bar 1-74", juce::String (worst * 1000, 1) + " ms (bar " + juce::String (worstBar) + ")");
+            bool barsOk = ! b.empty(); for (size_t k = 0; k < b.size(); ++k) barsOk = barsOk && std::abs (b[k] - (T0 + 4.0 * k * P)) < 0.002;
+            check ("R14", barsOk && ! fb.empty() && fb.front() >= 50 && fb.back() <= 75, "bars every 4 beats from 0.930 s, author told the broken bars only",
+                   "bars " + (fb.empty() ? juce::String ("-") : juce::String (fb.front()) + ".." + juce::String (fb.back())));
+            // живой темп — прямая не проходит, сетку не трогает
+            juce::AudioBuffer<float> lv (2, (int) (140 * sr)); lv.clear(); std::vector<double> lg; double tt = 1;
+            for (int k = 0; tt < 138; ++k) { lg.push_back (tt); const int s0 = (int) (tt * sr); for (int i = 0; i < (int) (0.1 * sr); ++i) for (int c = 0; c < 2; ++c) lv.addSample (c, s0 + i, (float) (std::exp (-i / sr * 30) * std::sin (2 * juce::MathConstants<double>::pi * ((k % 2) ? 220 : 60) * i / sr))); tt += 60.0 / (120.0 + 12.0 * tt / 138.0); }
+            std::vector<double> lb; for (size_t k = 0; k < lg.size(); k += 4) lb.push_back (lg[k]);
+            const auto lg0 = lg; std::vector<int> fb2;
+            const auto F2 = fitSteadyGrid (lv, sr, lg, lb, fb2);
+            check ("R14", ! F2.steady && lg == lg0, "live tempo 120 -> 132 BPM: not a straight line, grid left as it is", "worst window " + juce::String (F2.worstWindowMs, 1) + " ms");
         }
         out ("regressions: " + juce::String (n - bad) + "/" + juce::String (n) + " passed");
         return bad == 0 ? 0 : 7;

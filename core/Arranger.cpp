@@ -11,7 +11,7 @@ namespace dzod
 {
 namespace arranger
 {
-static const char* kEngineVersion = "0.9.0";
+static const char* kEngineVersion = "0.9.1";
 using stemmer::Stemmer;
 
 namespace
@@ -585,7 +585,7 @@ bool Engine::analyseVersion (Version& v, const juce::File& cacheDir, Progress pr
     // ключ кэша — файлы и роли (одинаковые id «V1» у разных песен не путаются)
     juce::String key; for (auto& s : v.stems) key << s.file.getFullPathName() << "|" << s.file.getSize() << "|" << s.file.getLastModificationTime().toMilliseconds() << "|" << s.role << ";";
     const auto base = juce::File::createLegalFileName (v.id) + "_" + juce::String::toHexString (key.hashCode64());
-    const auto cache = cacheDir.getChildFile (base + "_dzod_stemmer_v6.json");
+    const auto cache = cacheDir.getChildFile (base + "_dzod_stemmer_v7.json");
     const auto meta = cacheDir.getChildFile (base + "_meta_v3.json");
     if (cache.existsAsFile() && meta.existsAsFile() && readMeta (v, meta))
     {   // быстрый путь: версия уже разбиралась — звук не читаем
@@ -666,8 +666,10 @@ bool Engine::analyseVersion (Version& v, const juce::File& cacheDir, Progress pr
             for (size_t i = 0; i < v.stems.size(); ++i) if (v.stems[i].role == "drums" && ! v.stems[i].silent) d = &bufs[i];
             auto grid = st.analysis().grid; auto bars = st.analysis().bars;
             const auto g0 = grid.size();
-            // счёт долей (sound 15.11, AFTP: лишняя доля в тактах 53–58) — до проверки фазы
-            const bool fixed = regularizeGrid (grid, bars, v.gridFixedBars);
+            // ровная песня — сетка прямой по ударам (sound 15.11 21:50); живой темп — местный ремонт счёта долей (лишняя/пропущенная доля)
+            const auto fit = fitSteadyGrid (*d, sr, grid, bars, v.gridFixedBars);
+            const bool fixed = fit.steady || regularizeGrid (grid, bars, v.gridFixedBars);
+            v.steadyGrid = fit.steady;
             v.phase = checkPhase (*d, sr, grid, bars, st.analysis().musicStart);
             if (fixed || v.phase.halfShifted || v.phase.barChanged || grid.size() != g0)
             {
@@ -677,6 +679,7 @@ bool Engine::analyseVersion (Version& v, const juce::File& cacheDir, Progress pr
                     o->setProperty ("grid", arr (grid)); o->setProperty ("bars", arr (bars));
                     juce::Array<juce::var> fb; for (int b : v.gridFixedBars) fb.add (b);
                     o->setProperty ("arrangerGridFixedBars", fb);
+                    if (fit.steady) { o->setProperty ("arrangerSteadyPeriod", fit.period); o->setProperty ("arrangerSteadyWorstMs", fit.worstWindowMs); }
                     o->setProperty ("arrangerPhase", juce::String (v.phase.halfShifted ? "half-beat shifted; " : "") + (v.phase.barChanged ? "bars by kick+crash" : ""));
                     cache.replaceWithText (juce::JSON::toString (j));
                     if (! st.readAnalysis (cache)) { error = st.lastError(); return false; }

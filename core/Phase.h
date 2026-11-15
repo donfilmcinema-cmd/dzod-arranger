@@ -33,6 +33,15 @@ PhaseCheck checkPhase (const juce::AudioBuffer<float>& drums, double sampleRate,
 // такты — каждые 4 доли от первого такта. В fixedBars — номера тактов (с 1), где сетка исправлена. Возвращает true, если что-то поменял.
 bool regularizeGrid (std::vector<double>& grid, std::vector<double>& bars, std::vector<int>& fixedBars);
 
+// Ровная сетка по ударам (sound 15.11 21:50, AFTP: песня ровно 138,000 BPM, а трекер вставил долю в 53–58 и пол-доли в 62–65).
+// Удары малого и бочки -> прямая МНК на решётке восьмых с отбрасыванием выбросов > 30 мс (итерационно), период по всей песне,
+// фаза — по долям трекера (медиана, как было до сбоя). Проверка: медиана отклонения малого в каждом окне 8 с ≤ 5 мс.
+// Прошла — grid/bars заменяются ровной сеткой (такты — каждые 4 доли от первого такта), fixedBars — такты, где доля сдвинулась > 12 %.
+// Не прошла (живой темп) — ничего не меняет, false.
+struct SteadyFit { bool steady = false; double period = 0, phase = 0, worstWindowMs = 0; int hits = 0, windows = 0; };
+juce::StringArray& steadyFitDebug();   // строки разбора последнего fitSteadyGrid (окна 8 с) — для gridfit
+SteadyFit fitSteadyGrid (const juce::AudioBuffer<float>& drums, double sampleRate, std::vector<double>& grid, std::vector<double>& bars, std::vector<int>& fixedBars);
+
 // Только измерить (без правки): для отчётов и проверок.
 PhaseCheck measurePhase (const juce::AudioBuffer<float>& drums, double sampleRate, const std::vector<double>& grid, const std::vector<double>& bars);
 } // namespace dzod::arranger
