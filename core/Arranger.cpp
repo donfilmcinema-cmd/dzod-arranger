@@ -11,7 +11,7 @@ namespace dzod
 {
 namespace arranger
 {
-static const char* kEngineVersion = "0.9.1";
+static const char* kEngineVersion = "0.9.2";
 using stemmer::Stemmer;
 
 namespace
@@ -585,7 +585,7 @@ bool Engine::analyseVersion (Version& v, const juce::File& cacheDir, Progress pr
     // ключ кэша — файлы и роли (одинаковые id «V1» у разных песен не путаются)
     juce::String key; for (auto& s : v.stems) key << s.file.getFullPathName() << "|" << s.file.getSize() << "|" << s.file.getLastModificationTime().toMilliseconds() << "|" << s.role << ";";
     const auto base = juce::File::createLegalFileName (v.id) + "_" + juce::String::toHexString (key.hashCode64());
-    const auto cache = cacheDir.getChildFile (base + "_dzod_stemmer_v7.json");
+    const auto cache = cacheDir.getChildFile (base + "_dzod_stemmer_v8.json");   // v8 (0.9.2): длина и фаза такта по трекеру, один темп в кэше
     const auto meta = cacheDir.getChildFile (base + "_meta_v3.json");
     if (cache.existsAsFile() && meta.existsAsFile() && readMeta (v, meta))
     {   // быстрый путь: версия уже разбиралась — звук не читаем
@@ -679,7 +679,11 @@ bool Engine::analyseVersion (Version& v, const juce::File& cacheDir, Progress pr
                     o->setProperty ("grid", arr (grid)); o->setProperty ("bars", arr (bars));
                     juce::Array<juce::var> fb; for (int b : v.gridFixedBars) fb.add (b);
                     o->setProperty ("arrangerGridFixedBars", fb);
-                    if (fit.steady) { o->setProperty ("arrangerSteadyPeriod", fit.period); o->setProperty ("arrangerSteadyWorstMs", fit.worstWindowMs); }
+                    if (fit.steady)
+                    {   // ровная песня — один темп (в кэше трекер оставлял bpmMax 146 от сбоя); так же у studio 0.9.100
+                        o->setProperty ("arrangerSteadyPeriod", fit.period); o->setProperty ("arrangerSteadyWorstMs", fit.worstWindowMs);
+                        for (auto* k : { "bpmMin", "bpmMedian", "bpmMax", "tempoEstimate" }) o->setProperty (k, 60.0 / fit.period);
+                    }
                     o->setProperty ("arrangerPhase", juce::String (v.phase.halfShifted ? "half-beat shifted; " : "") + (v.phase.barChanged ? "bars by kick+crash" : ""));
                     cache.replaceWithText (juce::JSON::toString (j));
                     if (! st.readAnalysis (cache)) { error = st.lastError(); return false; }

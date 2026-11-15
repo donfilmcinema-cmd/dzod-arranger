@@ -180,11 +180,19 @@ SteadyFit fitSteadyGrid (const juce::AudioBuffer<float>& d, double sr, std::vect
     // ровная сетка от первой до последней доли трекера
     const double k0 = std::round ((grid.front() - t0) / m), k1 = std::round ((grid.back() - t0) / m);
     std::vector<double> g2; for (double k = k0; k <= k1 + 0.5; k += 1) g2.push_back (t0 + k * m);
+    // такт в долях — по тактам трекера (медиана), фаза такта — голосованием тактов трекера до первого сбоя (взято у studio 0.9.100)
     std::vector<double> b2;
     if (! bars.empty())
     {
-        size_t q0 = 0; for (size_t q = 0; q < g2.size(); ++q) if (std::abs (g2[q] - bars[0]) < std::abs (g2[q0] - bars[0])) q0 = q;
-        q0 %= 4; for (size_t q = q0; q < g2.size(); q += 4) b2.push_back (g2[q]);
+        int Bt = 4;
+        if (bars.size() > 2) { std::vector<double> bd; for (size_t i = 1; i < bars.size(); ++i) bd.push_back (bars[i] - bars[i - 1]);
+            std::nth_element (bd.begin(), bd.begin() + (long) bd.size() / 2, bd.end()); Bt = juce::jlimit (2, 12, (int) std::lround (bd[bd.size() / 2] / m)); }
+        double firstBad = 1e18;
+        for (double g : grid) { const double x = (g - t0) / m; if (std::abs (x - std::round (x)) > 0.15) { firstBad = g; break; } }
+        std::vector<int> votes ((size_t) Bt, 0);
+        for (double b : bars) { if (b >= firstBad && b != bars.front()) break; const long k = std::lround ((b - t0) / m) - (long) k0; ++votes[(size_t) (((k % Bt) + Bt) % Bt)]; }
+        const int ph = (int) (std::max_element (votes.begin(), votes.end()) - votes.begin());
+        for (size_t q = (size_t) ph; q < g2.size(); q += (size_t) Bt) b2.push_back (g2[q]);
     }
     movedBars (grid, g2, bars, m, fixedBars);
     grid = g2; if (! b2.empty()) bars = b2;

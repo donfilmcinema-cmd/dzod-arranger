@@ -739,6 +739,15 @@ int main (int argc, char** argv)
                    "period " + juce::String (F.period, 7) + " s, worst 8 s window " + juce::String (F.worstWindowMs, 1) + " ms");
             check ("R14", worst < 0.005, "snare on the grid +-5 ms in every bar 1-74", juce::String (worst * 1000, 1) + " ms (bar " + juce::String (worstBar) + ")");
             bool barsOk = ! b.empty(); for (size_t k = 0; k < b.size(); ++k) barsOk = barsOk && std::abs (b[k] - (T0 + 4.0 * k * P)) < 0.002;
+            // такт из 3 долей (вальс): длина такта — по тактам трекера, не всегда 4
+            {
+                std::vector<double> g3; for (int k = 0; k < beats; ++k) g3.push_back (T0 + k * P);
+                std::vector<double> b3; for (size_t k = 1; k < g3.size(); k += 3) b3.push_back (g3[k]);
+                g3[100] += 0.08; std::vector<int> fb3;      // один кривой удар трекера
+                const auto F3 = fitSteadyGrid (dr, sr, g3, b3, fb3);
+                bool ok3 = F3.steady && b3.size() > 10; for (size_t k = 0; ok3 && k < b3.size(); ++k) ok3 = std::abs (b3[k] - (T0 + (1 + 3.0 * k) * P)) < 0.002;
+                check ("R14", ok3, "bar length and phase from the tracker bars (3/4, first bar on beat 2 kept)", juce::String ((int) b3.size()) + " bars");
+            }
             check ("R14", barsOk && ! fb.empty() && fb.front() >= 50 && fb.back() <= 75, "bars every 4 beats from 0.930 s, author told the broken bars only",
                    "bars " + (fb.empty() ? juce::String ("-") : juce::String (fb.front()) + ".." + juce::String (fb.back())));
             // живой темп — прямая не проходит, сетку не трогает
