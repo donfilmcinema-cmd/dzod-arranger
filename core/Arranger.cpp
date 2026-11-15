@@ -11,7 +11,7 @@ namespace dzod
 {
 namespace arranger
 {
-static const char* kEngineVersion = "0.8.0";
+static const char* kEngineVersion = "0.9.0";
 using stemmer::Stemmer;
 
 namespace
@@ -518,6 +518,14 @@ std::vector<float> Engine::envelopeOf (const juce::File& f)
 }
 
 // Кэш разбора версии без звука: длина, громкость стемов, огибающие (байт на точку), тональность.
+static std::vector<int> readFixedBars (const juce::File& cache)
+{
+    std::vector<int> r;
+    auto j = juce::JSON::parse (cache.loadFileAsString());
+    if (auto* a = j["arrangerGridFixedBars"].getArray()) for (auto& x : *a) r.push_back ((int) x);
+    return r;
+}
+
 static bool readMeta (Version& v, const juce::File& f)
 {
     const auto j = juce::JSON::parse (f.loadFileAsString());
@@ -577,7 +585,7 @@ bool Engine::analyseVersion (Version& v, const juce::File& cacheDir, Progress pr
     // ключ кэша — файлы и роли (одинаковые id «V1» у разных песен не путаются)
     juce::String key; for (auto& s : v.stems) key << s.file.getFullPathName() << "|" << s.file.getSize() << "|" << s.file.getLastModificationTime().toMilliseconds() << "|" << s.role << ";";
     const auto base = juce::File::createLegalFileName (v.id) + "_" + juce::String::toHexString (key.hashCode64());
-    const auto cache = cacheDir.getChildFile (base + "_dzod_stemmer_v4.json");
+    const auto cache = cacheDir.getChildFile (base + "_dzod_stemmer_v6.json");
     const auto meta = cacheDir.getChildFile (base + "_meta_v3.json");
     if (cache.existsAsFile() && meta.existsAsFile() && readMeta (v, meta))
     {   // быстрый путь: версия уже разбиралась — звук не читаем
@@ -588,6 +596,7 @@ bool Engine::analyseVersion (Version& v, const juce::File& cacheDir, Progress pr
             v.analysisFile = cache;
             v.grid = A.grid; v.bars = A.bars; v.sections = A.sections;
             v.bpm = A.tempoEstimate > 0 ? A.tempoEstimate : A.bpmMedian; v.bpmMin = A.bpmMin; v.bpmMax = A.bpmMax;
+            v.gridFixedBars = readFixedBars (cache);
             v.analysed = true;
             say (1.0f, juce::String ("Ready (cached): ") + v.id);
             return true;
@@ -644,7 +653,7 @@ bool Engine::analyseVersion (Version& v, const juce::File& cacheDir, Progress pr
             if (w == nullptr) { error = juce::String ("Could not write a temporary file"); return false; }
             w->writeFromAudioSampleBuffer (sum, 0, sum.getNumSamples());
         }
-        stemmer::Job job; job.drums = noDrums ? tmp : drums; job.full = tmp; job.projectBpm = 0; job.straightenGrid = true;   // сетка без местных «вилок» в сбивках (drummer, 26.10)
+        stemmer::Job job; job.drums = noDrums ? tmp : drums; job.full = tmp; job.projectBpm = 0; job.straightenGrid = true; job.followDrums = ! noDrums && juce::SystemStats::getEnvironmentVariable ("DZOD_NO_FOLLOW", {}).isEmpty();   // сетка без местных «вилок» в сбивках (drummer, 26.10)
         juce::Array<stemmer::RoleFile> rf; for (auto& s : v.stems) rf.add ({ s.file, s.role });
         const bool ok = st.analyse (job, nullptr) && st.analyseSections (rf, nullptr);
         tmp.deleteFile();
@@ -657,13 +666,17 @@ bool Engine::analyseVersion (Version& v, const juce::File& cacheDir, Progress pr
             for (size_t i = 0; i < v.stems.size(); ++i) if (v.stems[i].role == "drums" && ! v.stems[i].silent) d = &bufs[i];
             auto grid = st.analysis().grid; auto bars = st.analysis().bars;
             const auto g0 = grid.size();
+            // счёт долей (sound 15.11, AFTP: лишняя доля в тактах 53–58) — до проверки фазы
+            const bool fixed = regularizeGrid (grid, bars, v.gridFixedBars);
             v.phase = checkPhase (*d, sr, grid, bars, st.analysis().musicStart);
-            if (v.phase.halfShifted || v.phase.barChanged || grid.size() != g0)
+            if (fixed || v.phase.halfShifted || v.phase.barChanged || grid.size() != g0)
             {
                 auto j = juce::JSON::parse (cache.loadFileAsString());
                 if (auto* o = j.getDynamicObject())
                 {
                     o->setProperty ("grid", arr (grid)); o->setProperty ("bars", arr (bars));
+                    juce::Array<juce::var> fb; for (int b : v.gridFixedBars) fb.add (b);
+                    o->setProperty ("arrangerGridFixedBars", fb);
                     o->setProperty ("arrangerPhase", juce::String (v.phase.halfShifted ? "half-beat shifted; " : "") + (v.phase.barChanged ? "bars by kick+crash" : ""));
                     cache.replaceWithText (juce::JSON::toString (j));
                     if (! st.readAnalysis (cache)) { error = st.lastError(); return false; }
@@ -676,6 +689,7 @@ bool Engine::analyseVersion (Version& v, const juce::File& cacheDir, Progress pr
     v.analysisFile = cache;
     v.grid = A.grid; v.bars = A.bars; v.sections = A.sections;
     v.bpm = A.tempoEstimate > 0 ? A.tempoEstimate : A.bpmMedian; v.bpmMin = A.bpmMin; v.bpmMax = A.bpmMax;
+    if (v.gridFixedBars.empty()) v.gridFixedBars = readFixedBars (cache);
 
     say (0.85f, juce::String ("Key: ") + v.id);
     std::vector<const juce::AudioBuffer<float>*> harm;
@@ -774,7 +788,7 @@ bool Engine::mixIntoStems (Project& P, const juce::File& cacheDir, const juce::F
 
     // 1) края кусков — на сильные доли; длина каждого куска на выходе и место в песне
     std::vector<int> plOf (P.pieces.size(), -1);                   // номер куска -> номер в раскладке (-1 — пропущен)
-    struct Placed { int index = 0; Piece pc; Version* v = nullptr; double a = 0, b = 0, dur = 0, at = 0, srcBpm = 0, stretchPct = 0; std::function<double (int)> map; Key key; };
+    struct Placed { int index = 0; Piece pc; Version* v = nullptr; double a = 0, b = 0, dur = 0, at = 0, srcBpm = 0, stretchPct = 0; bool steady = false; std::function<double (int)> map; Key key; };
     std::vector<Placed> pl;
     std::map<juce::String, std::unique_ptr<Stemmer>> st;
     double at = 0;
@@ -799,6 +813,49 @@ bool Engine::mixIntoStems (Project& P, const juce::File& cacheDir, const juce::F
         if (! st[v->id]->pieceMap (f, t, bpm, p.map, p.dur, p.a, p.b) || p.dur <= 0.05)
         { warnings.add (juce::String ("Slice ") + juce::String ((int) i + 1) + " (" + v->id + juce::String (") - could not build the stretch, skipped")); continue; }
         p.srcBpm = v->localBpm (p.a, p.b);
+        // устойчивый темп (sound 15.11: разброс темпа по тактам < 1 %) — кусок тянется одним коэффициентом, без карты по долям:
+        // ошибка трекера в одной доле не превращается в «ускорение» на выходе. Живой темп — карта по долям, как раньше.
+        {
+            std::vector<double> d; for (size_t k = 0; k + 1 < v->grid.size(); ++k) if (v->grid[k] >= p.a - 1e-3 && v->grid[k + 1] <= p.b + 1e-3) d.push_back (v->grid[k + 1] - v->grid[k]);
+            if (d.size() >= 8)
+            {
+                auto med = [] (std::vector<double> x) { std::nth_element (x.begin(), x.begin() + (long) x.size() / 2, x.end()); return x[x.size() / 2]; };
+                const double m = med (d);
+                double spread = 0;
+                for (size_t k = 0; k + 4 <= d.size(); k += 4) spread = juce::jmax (spread, std::abs (med (std::vector<double> (d.begin() + (long) k, d.begin() + (long) k + 4)) - m) / m);
+                const int nb = (int) std::lround ((p.b - p.a) / m);
+                if (spread < 0.01 && nb >= 1 && juce::SystemStats::getEnvironmentVariable ("DZOD_NO_STEADY", {}).isEmpty())
+                {   // опоры — только сильные доли (каждые 4 доли сетки), внутри такта — ровно: сбой трекера внутри такта не слышен,
+                    // а медленный уход темпа Suno (0,3–0,5 %) не копится по всему куску
+                    std::vector<double> src, dst;
+                    std::vector<double> g; for (double x : v->grid) if (x >= p.a - 1e-3 && x <= p.b + 1e-3) g.push_back (x);
+                    const double beat = 60.0 / bpm, sr = st[v->id]->analysis().sampleRate;
+                    if ((int) g.size() - 1 == nb)
+                    {
+                        for (int k = 0; k <= nb; k += 4) { src.push_back (g[(size_t) k]); dst.push_back (k * beat); }
+                        if (dst.back() < nb * beat - 1e-9) { src.push_back (g.back()); dst.push_back (nb * beat); }
+                    }
+                    else { src = { p.a, p.b }; dst = { 0.0, nb * beat }; }
+                    p.dur = nb * beat; p.steady = true;
+                    // гладкая (PCHIP) кривая через опоры: скорость растяжки меняется плавно, без ступенек на тактах
+                    const size_t K = src.size();
+                    std::vector<double> sl (K - 1), tg (K);
+                    for (size_t k = 0; k + 1 < K; ++k) sl[k] = (src[k + 1] - src[k]) / (dst[k + 1] - dst[k]);
+                    tg[0] = sl[0]; tg[K - 1] = sl[K - 2];
+                    for (size_t k = 1; k + 1 < K; ++k) tg[k] = sl[k - 1] * sl[k] <= 0 ? 0.0 : 2.0 / (1.0 / sl[k - 1] + 1.0 / sl[k]);
+                    p.map = [src, dst, sl, tg, sr] (int q)
+                    {
+                        const double tau = (double) q * Stemmer::StretchPlan::Hs / sr;
+                        if (tau <= dst.front()) return src.front() + (tau - dst.front()) * sl.front();
+                        if (tau >= dst.back())  return src.back() + (tau - dst.back()) * sl.back();
+                        size_t k = 0; while (k + 2 < dst.size() && tau > dst[k + 1]) ++k;
+                        const double h = dst[k + 1] - dst[k], s = (tau - dst[k]) / h, s2 = s * s, s3 = s2 * s;
+                        return (2 * s3 - 3 * s2 + 1) * src[k] + (s3 - 2 * s2 + s) * h * tg[k] + (-2 * s3 + 3 * s2) * src[k + 1] + (s3 - s2) * h * tg[k + 1];
+                    };
+                    p.srcBpm = 60.0 * nb / (p.b - p.a);
+                }
+            }
+        }
         p.stretchPct = 100.0 * (bpm / juce::jmax (1.0, p.srcBpm) - 1.0);
         p.at = at; at += p.dur;
         pc.from = p.a; pc.to = p.b;
@@ -806,6 +863,17 @@ bool Engine::mixIntoStems (Project& P, const juce::File& cacheDir, const juce::F
         pl.push_back (std::move (p));
     }
     if (pl.empty()) { error = juce::String ("No slice is longer than a beat"); return false; }
+    for (auto& v : P.versions)
+        if (! v.gridFixedBars.empty())
+        {
+            bool used = false; for (auto& p : pl) used = used || p.v == &v;
+            if (! used) continue;
+            juce::StringArray b;   // такты диапазонами: 53-58, 62-65
+            for (size_t k = 0; k < v.gridFixedBars.size();)
+            { size_t e = k; while (e + 1 < v.gridFixedBars.size() && v.gridFixedBars[e + 1] == v.gridFixedBars[e] + 1) ++e;
+              b.add (e == k ? juce::String (v.gridFixedBars[k]) : juce::String (v.gridFixedBars[k]) + "-" + juce::String (v.gridFixedBars[e])); k = e + 1; }
+            warnings.add (juce::String ("Variant ") + v.id + juce::String (": beat grid fixed (extra or missing beat) in bars ") + b.joinIntoString (", ") + juce::String (" - listen there"));
+        }
     const double total = at;
     const int handle = Stemmer::StretchPlan::Hs;                    // запас по краям куска для кроссфейда
     const int xf = juce::jmax (8, (int) std::lround (P.crossfadeMs * 0.001 * kOutRate));
@@ -1125,7 +1193,7 @@ bool Engine::mixIntoStems (Project& P, const juce::File& cacheDir, const juce::F
         o->setProperty ("at", pl[i].at); o->setProperty ("dur", pl[i].dur);
         o->setProperty ("bars", juce::roundToInt (pl[i].dur * bpm / 60.0 / 4.0 * 100) / 100.0);
         o->setProperty ("id", pl[i].pc.id);
-        o->setProperty ("srcBpm", pl[i].srcBpm); o->setProperty ("stretchPct", pl[i].stretchPct);
+        o->setProperty ("srcBpm", pl[i].srcBpm); o->setProperty ("stretchPct", pl[i].stretchPct); o->setProperty ("steadyStretch", pl[i].steady);
         o->setProperty ("key", pl[i].key.name());
         o->setProperty ("keyConfidence", pl[i].key.confidence);
         if (i > 0) o->setProperty ("notesSimilarityToPrev", pl[i].key.similarity (pl[i - 1].key));

@@ -47,6 +47,7 @@ struct Version
     std::vector<double> grid, bars;   // доли и сильные доли, с
     std::vector<dzod::stemmer::Section> sections;
     Key key;
+    std::vector<int> gridFixedBars;   // такты (с 1), где сетка долей исправлена по счёту долей (лишняя/пропущенная доля) — предупреждение автору
     PhaseCheck phase;                 // проверка сильной доли по барабанам (при первом разборе; из кэша — не заполняется)
     double mixLufs = -70;             // громкость всей версии (сумма стемов) — «Сравнить» на равной громкости
     std::map<juce::String, std::vector<float>> env;   // огибающая по строкам стола, 100 точек в секунду (для волн в окне)

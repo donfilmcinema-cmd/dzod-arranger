@@ -523,15 +523,16 @@ int main (int argc, char** argv)
                 {
                     mag (srcB, (juce::int64) ((from + (tt - at)) * sr2) + lag, fb);
                     float mx = 0; for (int k = 0; k < 1024; ++k) mx = juce::jmax (mx, fa[(size_t) k] + fb[(size_t) k]);
-                    double s = 0; int m = 0;
-                    for (int k = 1; k < 1024; ++k) if (fa[(size_t) k] + fb[(size_t) k] > 1e-4f * mx) { const double x = 20 * std::log10 ((fa[(size_t) k] + 1e-9) / (fb[(size_t) k] + 1e-9)); s += x * x; ++m; }
-                    if (m > 0) best = juce::jmin (best, std::sqrt (s / m));
+                    // общий сдвиг уровня (запас −1 dBFS, усиление Unify) — не «гребёнка»: считаем разброс вокруг среднего
+                    double s = 0, s1 = 0; int m = 0;
+                    for (int k = 1; k < 1024; ++k) if (fa[(size_t) k] + fb[(size_t) k] > 1e-4f * mx) { const double x = 20 * std::log10 ((fa[(size_t) k] + 1e-9) / (fb[(size_t) k] + 1e-9)); s += x * x; s1 += x; ++m; }
+                    if (m > 0) best = juce::jmin (best, std::sqrt (juce::jmax (0.0, s / m - (s1 / m) * (s1 / m))));
                 }
                 if (best < 1e8) d.push_back (best);
             }
             std::sort (d.begin(), d.end());
             const double med = d.empty() ? 99 : d[d.size() / 2];
-            check ("R1", med < 3.0, "drums of an unstretched slice ~ the source (no metallic comb)", "spectral distance median " + juce::String (med, 2) + " dB, WSOLA gave 4.0");
+            check ("R1", med < 3.0, "drums of an unstretched slice ~ the source (no metallic comb)", "spectral distance median " + juce::String (med, 2) + " dB, WSOLA gives 4.7");
         }
         // R2 28.10 ложная тревога «разная тональность» на стыке 29,4 с (автор: тональность одна)
         juce::String keyWarn; if (ok) for (auto& w : *rep["warnings"].getArray()) if (w.toString().contains ("keys may differ")) keyWarn << w.toString();
@@ -655,6 +656,31 @@ int main (int argc, char** argv)
             check ("R11", okA && m.kickOnBeatsPct >= 65, "THIN AS PAPER: kick on the beats in >= 65 % of bars (exact shifted grid gives 77 %, before 26 %)", juce::String (m.kickOnBeatsPct, 0) + " %");
         }
         else out ("SKIP  R11  (no THIN AS PAPER drums file given)");
+        // R13 15.11 AFTP New Space(9): трекер вставил лишнюю долю в тактах 53–58 (25 долей там, где играют 24) — сетка чинится по счёту долей
+        {
+            const double m = 60.0 / 138.07;
+            std::vector<double> g, b; for (int k = 0; k <= 4 * 52; ++k) g.push_back (1.0 + k * m);     // такты 1..52 ровно
+            const double a0 = g.back();
+            for (int k = 1; k <= 25; ++k) g.push_back (a0 + 24 * m * k / 25.0);                          // 24 доли растянуты на 25 (такты 53–58)
+            const double a1 = g.back(); for (int k = 1; k <= 4 * 30; ++k) g.push_back (a1 + k * m);
+            for (size_t k = 0; k < g.size(); k += 4) b.push_back (g[k]);
+            const auto n0 = g.size(); std::vector<int> fb;
+            const bool ch = regularizeGrid (g, b, fb);
+            double dmin = 1e9, dmax = 0; for (size_t k = 0; k + 1 < g.size(); ++k) { dmin = juce::jmin (dmin, g[k + 1] - g[k]); dmax = juce::jmax (dmax, g[k + 1] - g[k]); }
+            bool barsOk = b.size() > 60; for (size_t k = 0; k < b.size(); ++k) barsOk = barsOk && std::abs (b[k] - (1.0 + 4 * k * m)) < 0.01;
+            const bool has = ! fb.empty() && fb.front() >= 50 && fb.back() <= 61 && std::find (fb.begin(), fb.end(), 55) != fb.end();
+            check ("R13", ch && g.size() == n0 - 1 && dmin > 0.97 * m && dmax < 1.03 * m, "extra beat in bars 53-58 removed: 24 beats, every beat 0.435 s",
+                   juce::String ((int) n0) + " -> " + juce::String ((int) g.size()) + " beats, " + juce::String (dmin, 3) + ".." + juce::String (dmax, 3) + " s");
+            check ("R13", barsOk && has, "bars every 4 beats again after the fix, author told bars 53-58 (not the whole song)", "bars " + (fb.empty() ? juce::String ("-") : juce::String (fb.front()) + ".." + juce::String (fb.back())));
+            // живой темп: плавное ускорение 120 -> 132 BPM и дрожание ±8 мс — не трогать
+            std::vector<double> lg, lb; double t0 = 0; juce::Random r (7);
+            for (int k = 0; k < 256; ++k) { lg.push_back (t0 + (r.nextDouble() - 0.5) * 0.016); t0 += 60.0 / (120.0 + 12.0 * k / 256.0); }
+            for (size_t k = 0; k < lg.size(); k += 4) lb.push_back (lg[k]);
+            std::vector<int> fb2;
+            check ("R13", ! regularizeGrid (lg, lb, fb2), "live tempo (120 -> 132 BPM, +-8 ms) is left as it is", juce::String ((int) fb2.size()) + " bars touched");
+            int touched = 0; for (auto& v : vs) touched += (int) v.gridFixedBars.size();
+            check ("R13", touched == 0, "RIGOR 04A-04D: beat grids not touched by the beat count", juce::String (touched) + " bars");
+        }
         out ("regressions: " + juce::String (n - bad) + "/" + juce::String (n) + " passed");
         return bad == 0 ? 0 : 7;
     }

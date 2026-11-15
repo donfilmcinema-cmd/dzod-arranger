@@ -28,6 +28,11 @@ struct PhaseCheck
 // musicStart — начало музыки, с (сетка достраивается назад до него, если Stemmer пропустил первые доли).
 PhaseCheck checkPhase (const juce::AudioBuffer<float>& drums, double sampleRate, std::vector<double>& grid, std::vector<double>& bars, double musicStart = 0);
 
+// Счёт долей (sound 15.11, AFTP: на тактах 53–58 трекер вставил лишнюю долю — 25 долей там, где играют 24, доли 0,38–0,41 с вместо 0,435):
+// участок, где доли короче 0,9 или длиннее 1,1 местной медианы, пересчитывается ровно — столько долей, сколько помещается по медиане;
+// такты — каждые 4 доли от первого такта. В fixedBars — номера тактов (с 1), где сетка исправлена. Возвращает true, если что-то поменял.
+bool regularizeGrid (std::vector<double>& grid, std::vector<double>& bars, std::vector<int>& fixedBars);
+
 // Только измерить (без правки): для отчётов и проверок.
 PhaseCheck measurePhase (const juce::AudioBuffer<float>& drums, double sampleRate, const std::vector<double>& grid, const std::vector<double>& bars);
 } // namespace dzod::arranger

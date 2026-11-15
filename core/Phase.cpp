@@ -85,6 +85,83 @@ int nearestIndex (const std::vector<double>& g, double t)
 }
 } // namespace
 
+bool regularizeGrid (std::vector<double>& grid, std::vector<double>& bars, std::vector<int>& fixedBars)
+{
+    fixedBars.clear();
+    const int n = (int) grid.size();
+    if (n < 16) return false;
+    std::vector<double> d ((size_t) n - 1);
+    for (int i = 0; i + 1 < n; ++i) d[(size_t) i] = grid[(size_t) i + 1] - grid[(size_t) i];
+    // опорная доля — медиана интервалов в ±32 долях (лишняя доля размазана по ~25 интервалам, медиану не сдвигает)
+    auto medAround = [&] (int c)
+    {
+        std::vector<double> w;
+        for (int k = juce::jmax (0, c - 32); k <= juce::jmin (n - 2, c + 32); ++k) w.push_back (d[(size_t) k]);
+        std::nth_element (w.begin(), w.begin() + (long) w.size() / 2, w.end());
+        return w[w.size() / 2];
+    };
+    std::vector<double> mref ((size_t) n - 1);
+    for (int i = 0; i + 1 < n; ++i) mref[(size_t) i] = medAround (i);
+    // плохие интервалы: (а) сама доля короче 0,9 / длиннее 1,15 опорной;
+    // (б) окно в W долей вмещает на ≥ 0,6 доли больше или меньше, чем W (лишняя или пропущенная доля, размазанная по участку)
+    std::vector<char> bad ((size_t) n - 1, 0);
+    for (int i = 0; i + 1 < n; ++i) if (d[(size_t) i] < 0.9 * mref[(size_t) i] || d[(size_t) i] > 1.15 * mref[(size_t) i]) bad[(size_t) i] = 1;
+    for (int W : { 8, 16, 32, 48 })
+        for (int i = 0; i + W < n; ++i)
+        {
+            const double m = mref[(size_t) (i + W / 2)];
+            if (std::abs ((grid[(size_t) (i + W)] - grid[(size_t) i]) / m - W) >= 0.6)
+                for (int k = i; k < i + W; ++k) bad[(size_t) k] = 1;
+        }
+    auto barOf = [&] (double t) { int b = 0; for (size_t k = 0; k < bars.size(); ++k) if (bars[k] <= t + 1e-6) b = (int) k; return b + 1; };
+    std::vector<double> out; out.push_back (grid[0]);
+    bool changed = false;
+    int i = 0;
+    while (i + 1 < n)
+    {
+        if (! bad[(size_t) i]) { out.push_back (grid[(size_t) i + 1]); ++i; continue; }
+        int j = i; while (j + 1 < n && bad[(size_t) j]) ++j;          // доли i..j: интервалы i..j-1 плохие
+        const double a = grid[(size_t) i], b = grid[(size_t) j];
+        // доля — медиана хороших интервалов рядом (вне участка)
+        std::vector<double> w;
+        for (int k = juce::jmax (0, i - 32); k <= juce::jmin (n - 2, j + 32); ++k) if (! bad[(size_t) k]) w.push_back (d[(size_t) k]);
+        double m = mref[(size_t) i];
+        if (w.size() >= 4) { std::nth_element (w.begin(), w.begin() + (long) w.size() / 2, w.end()); m = w[w.size() / 2]; }
+        const int k = juce::jmax (1, (int) std::lround ((b - a) / m));
+        double mx = 0;
+        if (k == j - i) for (int q = i + 1; q < j; ++q) mx = juce::jmax (mx, std::abs (grid[(size_t) q] - (a + (b - a) * (q - i) / k)));
+        if (k != j - i || mx > 0.1 * m)
+        {
+            for (int q = 1; q < k; ++q) out.push_back (a + (b - a) * q / k);
+            out.push_back (b);
+            changed = true;
+            for (int bb = barOf (a); bb <= barOf (b); ++bb) if (fixedBars.empty() || fixedBars.back() < bb) fixedBars.push_back (bb);
+        }
+        else for (int q = i + 1; q <= j; ++q) out.push_back (grid[(size_t) q]);
+        i = j;
+    }
+    if (! changed) return false;
+    {   // автору — только такты, где доля реально сдвинулась (больше 12 % доли) или исчезла / появилась
+        fixedBars.clear();
+        std::vector<double> all (d); std::nth_element (all.begin(), all.begin() + (long) all.size() / 2, all.end());
+        const double m = all[all.size() / 2];
+        auto mark = [&] (double tm) { const int bb = barOf (tm); if (std::find (fixedBars.begin(), fixedBars.end(), bb) == fixedBars.end()) fixedBars.push_back (bb); };
+        auto far = [m] (const std::vector<double>& a, double x) { auto it = std::lower_bound (a.begin(), a.end(), x); double best = 1e9;
+            if (it != a.end()) best = *it - x; if (it != a.begin()) best = juce::jmin (best, x - *(it - 1)); return best > 0.12 * m; };
+        for (double x : out)  if (far (grid, x)) mark (x);
+        for (double x : grid) if (far (out, x))  mark (x);
+        std::sort (fixedBars.begin(), fixedBars.end());
+    }
+    if (! bars.empty())
+    {
+        int k0 = 0; for (int q = 0; q < (int) out.size(); ++q) if (std::abs (out[(size_t) q] - bars[0]) < std::abs (out[(size_t) k0] - bars[0])) k0 = q;
+        std::vector<double> b2; for (size_t q = (size_t) k0; q < out.size(); q += 4) b2.push_back (out[q]);
+        bars = b2;
+    }
+    grid = out;
+    return true;
+}
+
 PhaseCheck measurePhase (const juce::AudioBuffer<float>& d, double sr, const std::vector<double>& grid, const std::vector<double>& bars)
 {
     return measure (bandsOf (d, sr), grid, bars);

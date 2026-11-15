@@ -3,6 +3,7 @@
 #include "DzodStemmer.h"
 #include "Mp3Writer.h"
 #include <algorithm>
+#include <limits>
 #include <cmath>
 #include <map>
 #include <numeric>
@@ -270,6 +271,52 @@ void straighten (VecD& bt, int w, double tol)
     }
 }
 
+// Доли — за ударами барабанов (Arranger, sound 11.11 18:00). Для каждой доли — ближайший сильный удар бочки / малого в ±45 мс;
+// местный сдвиг — по своему удару (нет удара — среднее соседей); из него вычитается общий сдвиг песни
+// (задержка атаки одинакова везде и сетку не двигает). Где ударов нет — сдвиг плавно между соседними известными.
+void followDrums (VecD& bt, const Feat& fd)
+{
+    const int nb = (int) bt.size(); if (nb < 8 || fd.n < 16) return;
+    const Vec lo = normOdf (fd.odf[0]), md = normOdf (fd.odf[2]);
+    auto frameAt = [&] (double sec) { return (int) (std::lower_bound (fd.t.begin(), fd.t.end(), sec) - fd.t.begin()); };
+    const double win = 0.045;
+    VecD off ((size_t) nb, std::numeric_limits<double>::quiet_NaN());
+    for (int i = 0; i < nb; ++i)
+    {
+        const int f0 = juce::jmax (0, frameAt (bt[(size_t) i] - win)), f1 = juce::jmin (fd.n - 1, frameAt (bt[(size_t) i] + win));
+        int bk = -1; float bv = 0;
+        for (int k = f0; k <= f1; ++k) { const float v = lo[(size_t) k] + md[(size_t) k]; if (v > bv) { bv = v; bk = k; } }
+        if (bk >= 0 && bv > 3.0f) off[(size_t) i] = fd.t[(size_t) bk] - bt[(size_t) i];
+    }
+    VecD all; for (double x : off) if (! std::isnan (x)) all.push_back (x);
+    if (all.size() < 8) return;
+    std::nth_element (all.begin(), all.begin() + (long) all.size() / 2, all.end());
+    const double global = all[all.size() / 2];
+    VecD loc ((size_t) nb, std::numeric_limits<double>::quiet_NaN());
+    for (int i = 0; i < nb; ++i)
+    {
+        // свой удар есть — по нему (резкий сдвиг на одной доле тоже ловится); нет — медиана соседей
+        if (! std::isnan (off[(size_t) i])) { loc[(size_t) i] = juce::jlimit (-win, win, off[(size_t) i] - global); continue; }
+        VecD w; for (int j = juce::jmax (0, i - 1); j <= juce::jmin (nb - 1, i + 1); ++j) if (! std::isnan (off[(size_t) j])) w.push_back (off[(size_t) j]);
+        if (w.size() < 2) continue;
+        loc[(size_t) i] = juce::jlimit (-win, win, 0.5 * (w[0] + w[1]) - global);
+    }
+    // пропуски — по прямой между известными, края — ближайшее известное
+    int prev = -1;
+    for (int i = 0; i <= nb; ++i)
+    {
+        if (i < nb && std::isnan (loc[(size_t) i])) continue;
+        const double a = prev >= 0 ? loc[(size_t) prev] : (i < nb ? loc[(size_t) i] : 0.0), b = i < nb ? loc[(size_t) i] : a;
+        for (int j = prev + 1; j < i; ++j) loc[(size_t) j] = prev < 0 ? b : (i >= nb ? a : a + (b - a) * (j - prev) / (double) (i - prev));
+        prev = i;
+    }
+    VecD out (bt);
+    for (int i = 0; i < nb; ++i)   // меньше 6 мс — сетка прежняя (дрожь кадра не переносим в растяжку)
+        out[(size_t) i] = bt[(size_t) i] + (std::isnan (loc[(size_t) i]) || std::abs (loc[(size_t) i]) < 0.006 ? 0.0 : loc[(size_t) i]);
+    for (int i = 1; i < nb; ++i) out[(size_t) i] = juce::jmax (out[(size_t) i], out[(size_t) i - 1] + 0.5 * (bt[(size_t) i] - bt[(size_t) i - 1]));   // доли не меняются местами
+    bt.swap (out);
+}
+
 // Темп без подсказки: автокорреляция кривой атак по всей музыке, кандидаты 60-200 BPM (доля, 2, 4, 8 долей),
 // между темпом и его половиной / удвоением выбирает мягкое предпочтение ~120 BPM (лог-гаусс).
 double estimateTempo (const Vec& o, int a0, int a1, double FR)
@@ -398,6 +445,7 @@ bool Stemmer::analyse (const Job& job, Progress progress)
     VecD bt; { VecD xi, yi; for (int i = first; i <= last; ++i) if (ok[(size_t) i]) { xi.push_back (i); yi.push_back (ref[(size_t) i]); } for (int i = first; i <= last; ++i) bt.push_back (interp (i, xi, yi)); }
     savgol11 (bt);
     if (job.straightenGrid) straighten (bt, 8, 0.010);
+    if (job.followDrums) followDrums (bt, I.fd);
     const double p0 = (bt[8] - bt[0]) / 8.0, p1 = (bt.back() - bt[bt.size() - 9]) / 8.0, dur = (double) I.fullMono.size() / I.sr;
     I.grid.clear(); for (int k = (int) (bt[0] / p0); k >= 1; --k) I.grid.push_back (bt[0] - p0 * k);
     I.grid.insert (I.grid.end(), bt.begin(), bt.end());
