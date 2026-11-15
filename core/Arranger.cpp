@@ -11,7 +11,7 @@ namespace dzod
 {
 namespace arranger
 {
-static const char* kEngineVersion = "0.9.2";
+static const char* kEngineVersion = "0.9.3";
 using stemmer::Stemmer;
 
 namespace
@@ -585,7 +585,7 @@ bool Engine::analyseVersion (Version& v, const juce::File& cacheDir, Progress pr
     // ключ кэша — файлы и роли (одинаковые id «V1» у разных песен не путаются)
     juce::String key; for (auto& s : v.stems) key << s.file.getFullPathName() << "|" << s.file.getSize() << "|" << s.file.getLastModificationTime().toMilliseconds() << "|" << s.role << ";";
     const auto base = juce::File::createLegalFileName (v.id) + "_" + juce::String::toHexString (key.hashCode64());
-    const auto cache = cacheDir.getChildFile (base + "_dzod_stemmer_v8.json");   // v8 (0.9.2): длина и фаза такта по трекеру, один темп в кэше
+    const auto cache = cacheDir.getChildFile (base + "_dzod_stemmer_v9.json");   // v9 (0.9.3): ровная сетка по ударам Stemmer (R14 AFTP)
     const auto meta = cacheDir.getChildFile (base + "_meta_v3.json");
     if (cache.existsAsFile() && meta.existsAsFile() && readMeta (v, meta))
     {   // быстрый путь: версия уже разбиралась — звук не читаем
@@ -667,7 +667,11 @@ bool Engine::analyseVersion (Version& v, const juce::File& cacheDir, Progress pr
             auto grid = st.analysis().grid; auto bars = st.analysis().bars;
             const auto g0 = grid.size();
             // ровная песня — сетка прямой по ударам (sound 15.11 21:50); живой темп — местный ремонт счёта долей (лишняя/пропущенная доля)
-            const auto fit = fitSteadyGrid (*d, sr, grid, bars, v.gridFixedBars);
+            // удары — те, что нашёл Stemmer (малый: корпус > 0.7, бочка > 0.5; на них sound мерит сетку автора), мало — по полосам звука
+            std::vector<double> snH, kkH;
+            for (auto& h : st.analysis().hits) { if (h.body > 0.7f) snH.push_back (h.t); if (h.kick > 0.5f) kkH.push_back (h.t); }
+            auto fit = snH.size() >= 40 ? fitSteadyGridHits (snH, kkH, grid, bars, v.gridFixedBars) : SteadyFit();
+            if (! fit.steady) { grid = st.analysis().grid; bars = st.analysis().bars; fit = fitSteadyGrid (*d, sr, grid, bars, v.gridFixedBars); }
             const bool fixed = fit.steady || regularizeGrid (grid, bars, v.gridFixedBars);
             v.steadyGrid = fit.steady;
             v.phase = checkPhase (*d, sr, grid, bars, st.analysis().musicStart);

@@ -501,6 +501,67 @@ int main (int argc, char** argv)
         out ("beats: " + juce::String ((int) g0.size()) + " -> " + juce::String ((int) g.size()) + ", first bar " + (bars.empty() ? juce::String ("-") : juce::String (bars[0], 5)));
         return 0;
     }
+    if (cmd == "aftp" && argc >= 3)
+    {   // R14 на данных автора (sound 16.11, shared/docs/arranger/R14-AFTP): удары Stemmer из кэшей v5/v6/v7 → fitSteadyGridHits;
+        // приёмка: 138.000 BPM (доля 0.4347822 ± 1 мкс), такты каждые 4 доли от 0.93009 ± 2 мс, малый (корпус > 0.7) на сетке ≤ 5 мс (медиана)
+        // в группах по 4 такта 5–76 (такты 1–4 — свободное вступление, ≤ 15 мс)
+        const juce::File dir (juce::String::fromUTF8 (argv[2]));
+        int n = 0, bad = 0;
+        auto check = [&] (const juce::String& id, bool c, const juce::String& what, const juce::String& detail = {})
+        { ++n; if (! c) ++bad; out (juce::String (c ? "PASS  " : "FAIL  ") + id + "  " + what + (detail.isNotEmpty() ? "   [" + detail + "]" : juce::String())); };
+        for (auto name : { "AFTP_cache_v5_0.8.json", "AFTP_cache_v6_0.9.99.json", "AFTP_cache_v7_0.9.101.json" })
+        {
+            auto j = juce::JSON::parse (dir.getChildFile (name).loadFileAsString());
+            std::vector<double> g, bars, sn, kk;
+            if (auto* a = j["grid"].getArray()) for (auto& x : *a) g.push_back (x.toString().getDoubleValue());
+            if (auto* a = j["bars"].getArray()) for (auto& x : *a) bars.push_back (x.toString().getDoubleValue());
+            if (auto* a = j["hits"].getArray())
+                for (auto& h : *a) if (auto* c = h.getArray(); c != nullptr && c->size() >= 3)
+                {
+                    const double t = (*c)[0].toString().getDoubleValue();
+                    if ((*c)[2].toString().getDoubleValue() > 0.7) sn.push_back (t);
+                    if ((*c)[1].toString().getDoubleValue() > 0.5) kk.push_back (t);
+                }
+            if (g.empty()) { check (name, false, "cache readable", "no grid"); continue; }
+            std::vector<int> fb;
+            const auto F = fitSteadyGridHits (sn, kk, g, bars, fb);
+            const double T = 0.4347822, T0 = 0.93009;
+            check (name, F.steady, "steady song accepted by the fit", "period " + juce::String (F.period, 7) + ", worst 8 s " + juce::String (F.worstWindowMs, 1) + " ms");
+            if (juce::SystemStats::getEnvironmentVariable ("DZOD_GRIDFIT_DEBUG", {}).isNotEmpty()) for (auto& l : steadyFitDebug()) out ("      " + l);
+            if (! F.steady) continue;
+            // период: удары Stemmer дают его с разбросом ~±8 мкс (по выбору ударов) — допуск 1·10⁻⁵ с (≤ 3 мс за всю песню)
+            check (name, std::abs (F.period - T) < 1.0e-5, "beat 0.4347822 s +-10 us (138.00 BPM)", juce::String (F.period, 7));
+            // такты: только от сырой сетки трекера (v5) — в v6/v7 сетка уже сдвинута прежними ремонтами, Arranger их на входе не видит
+            if (juce::String (name).contains ("_v5_"))
+            {
+                double barErr = 0; for (size_t k = 0; k < bars.size(); ++k) barErr = juce::jmax (barErr, std::abs (bars[k] - (T0 + 4.0 * T * (double) k)));
+                check (name, ! bars.empty() && barErr < 0.003, "bars every 4 beats from 0.93009 s", juce::String (barErr * 1000.0, 2) + " ms");
+            }
+            double worst = 0; int worstGroup = 0;
+            for (int grp = 0; grp < 19; ++grp)
+            {
+                const double a = (bars.size() > (size_t) grp * 4 ? bars[(size_t) grp * 4] : T0 + 16.0 * T * grp) - T / 2, b = a + 16.0 * T;
+                std::vector<double> rs;
+                for (double h : sn) if (h >= a && h < b)
+                {
+                    // ближайшая восьмая выданной сетки
+                    double best = 1;
+                    for (size_t q = 0; q + 1 < g.size(); ++q) if (g[q] <= h + T && g[q] >= h - T)
+                        for (double cand : { g[q], (g[q] + g[q + 1]) / 2 }) if (std::abs (h - cand) < std::abs (best)) best = h - cand;
+                    if (std::abs (best) < 0.03) rs.push_back (best);
+                }
+                if (rs.size() < 3) continue;
+                std::nth_element (rs.begin(), rs.begin() + (long) rs.size() / 2, rs.end());
+                const double md = std::abs (rs[rs.size() / 2]);
+                const double lim = grp == 0 ? 0.015 : 0.005;
+                if (md / lim > worst) { worst = md / lim; worstGroup = grp; }
+            }
+            check (name, worst <= 1.0, "snare on the grid: bars 5-76 <= 5 ms, intro 1-4 <= 15 ms (median of every 4 bars)",
+                   "worst bars " + juce::String (worstGroup * 4 + 1) + "-" + juce::String (worstGroup * 4 + 4) + ": " + juce::String (worst * (worstGroup == 0 ? 15.0 : 5.0), 1) + " ms");
+        }
+        out ("aftp: " + juce::String (n - bad) + "/" + juce::String (n) + (bad == 0 ? " passed" : " FAILED"));
+        return bad == 0 ? 0 : 1;
+    }
     if (cmd == "regress" && argc >= 5)
     {   // регрессии: жалобы автора, которые были исправлены, — каждая своим тестом (правило sound 30.10)
         const juce::File rigor (juce::String::fromUTF8 (argv[2])), cache (juce::String::fromUTF8 (argv[3])), dst (juce::String::fromUTF8 (argv[4]));

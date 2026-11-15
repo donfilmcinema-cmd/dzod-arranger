@@ -41,6 +41,8 @@ bool regularizeGrid (std::vector<double>& grid, std::vector<double>& bars, std::
 struct SteadyFit { bool steady = false; double period = 0, phase = 0, worstWindowMs = 0; int hits = 0, windows = 0; };
 juce::StringArray& steadyFitDebug();   // строки разбора последнего fitSteadyGrid (окна 8 с) — для gridfit
 SteadyFit fitSteadyGrid (const juce::AudioBuffer<float>& drums, double sampleRate, std::vector<double>& grid, std::vector<double>& bars, std::vector<int>& fixedBars);
+// То же по готовым ударам: малый (sn) и бочка (kk), времена в с (удары Stemmer из кэша — R14 на данных автора, studio 16.11).
+SteadyFit fitSteadyGridHits (const std::vector<double>& snare, const std::vector<double>& kick, std::vector<double>& grid, std::vector<double>& bars, std::vector<int>& fixedBars);
 
 // Только измерить (без правки): для отчётов и проверок.
 PhaseCheck measurePhase (const juce::AudioBuffer<float>& drums, double sampleRate, const std::vector<double>& grid, const std::vector<double>& bars);

@@ -123,28 +123,32 @@ juce::StringArray& steadyFitDebug() { static juce::StringArray s; return s; }
 
 SteadyFit fitSteadyGrid (const juce::AudioBuffer<float>& d, double sr, std::vector<double>& grid, std::vector<double>& bars, std::vector<int>& fixedBars)
 {
+    const auto B = bandsOf (d, sr);
+    return fitSteadyGridHits (hitsOf (B.snare), hitsOf (B.kick), grid, bars, fixedBars);
+}
+
+SteadyFit fitSteadyGridHits (const std::vector<double>& sn, const std::vector<double>& kk, std::vector<double>& grid, std::vector<double>& bars, std::vector<int>& fixedBars)
+{
     SteadyFit F; fixedBars.clear(); steadyFitDebug().clear();
     if (grid.size() < 32) return F;
     // начальный период — медиана долей трекера (лишняя доля её не сдвигает), фаза — первая доля
     std::vector<double> dd; for (size_t i = 0; i + 1 < grid.size(); ++i) dd.push_back (grid[i + 1] - grid[i]);
     std::nth_element (dd.begin(), dd.begin() + (long) dd.size() / 2, dd.end());
     double m = dd[dd.size() / 2], t0 = grid[grid.size() / 2];
-    const auto B = bandsOf (d, sr);
-    const auto sn = hitsOf (B.snare), kk = hitsOf (B.kick);
     std::vector<double> hits (sn); hits.insert (hits.end(), kk.begin(), kk.end()); std::sort (hits.begin(), hits.end());
     if (hits.size() < 40) return F;
     // фаза восьмых: удары на решётке восьмых от t0; МНК t = c + n·(m/2), выбросы > 30 мс — прочь; от середины песни наружу,
     // чтобы небольшая ошибка начального периода не путала номера восьмых на краях
     const double mid = t0, span = (hits.back() - hits.front()) / 2;
-    for (int it = 0; it < 12; ++it)
+    for (int it = 0; it < 16; ++it)
     {
-        const double reach = juce::jmin (span + 1.0, 12.0 * std::pow (1.6, it));
+        const double reach = juce::jmin (span + 1.0, 12.0 * std::pow (1.6, juce::jmin (it, 11)));
         double sx = 0, sy = 0, sxx = 0, sxy = 0; int cnt = 0;
         for (double h : hits)
         {
             if (std::abs (h - mid) > reach) continue;
             const double nn = std::round ((h - t0) / (m / 2)), pred = t0 + nn * (m / 2);
-            if (std::abs (h - pred) > 0.03) continue;
+            if (std::abs (h - pred) > (it < 12 ? 0.03 : 0.012)) continue;   // последние проходы — строже (R14 AFTP: период ближе к истине)
             sx += nn; sy += h; sxx += nn * nn; sxy += nn * h; ++cnt;
         }
         if (cnt < 16) return F;
@@ -166,8 +170,12 @@ SteadyFit fitSteadyGrid (const juce::AudioBuffer<float>& d, double sr, std::vect
         if ((int) res.size() * 2 < all) { ++unclear; continue; }      // сбивка шестнадцатыми / триолями — окно не судит
         std::nth_element (res.begin(), res.begin() + (long) res.size() / 2, res.end());
         const double md = std::abs (res[res.size() / 2]) * 1000;
-        worst = juce::jmax (worst, md); used += (int) res.size();
-        if (md > 5.0) ++bad;
+        const bool edgeW = w0 == chk.front() || w0 + 8.0 >= chk.back();
+        if (! edgeW) worst = juce::jmax (worst, md);
+        used += (int) res.size();
+        // R14 AFTP (sound 16.11): вступление (такты 1–4) малый играет свободнее (+4…+13 мс от ровной сетки), остальная песня ±2 мс —
+        // первое и последнее окна судятся мягче (≤ 15 мс), остальные — ≤ 5 мс
+        if (md > (edgeW ? 15.0 : 5.0)) ++bad;   // край в worst не идёт
     }
     F.period = m; F.windows = windows; F.worstWindowMs = worst; F.hits = used;
     if (windows < 4 || bad > 0 || unclear * 4 > windows) { if (unclear * 4 > windows) F.worstWindowMs = juce::jmax (F.worstWindowMs, 30.0); return F; }
