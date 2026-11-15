@@ -537,6 +537,21 @@ int main (int argc, char** argv)
                 double barErr = 0; for (size_t k = 0; k < bars.size(); ++k) barErr = juce::jmax (barErr, std::abs (bars[k] - (T0 + 4.0 * T * (double) k)));
                 check (name, ! bars.empty() && barErr < 0.003, "bars every 4 beats from 0.93009 s", juce::String (barErr * 1000.0, 2) + " ms");
             }
+            {   // сильная доля по бочке (sound 16.11: энергия ошиблась на 1/8 — 0.7132 вместо 0.9301): сетку на полдоли раньше — поправить без вопроса
+                auto gs = g, bs = bars; for (auto& x : gs) x -= T / 2; for (auto& x : bs) x -= T / 2;
+                PhaseCheck pc; pc.ambiguous = true;
+                settleByKickHits (kk, gs, bs, pc);
+                double e1 = 1; for (double b : bs) if (b > 0.5) { const double x = (b - T0) / (4 * T); e1 = std::abs (x - std::round (x)) * 4 * T; break; }
+                check (name, e1 < 0.003 && ! pc.ambiguous, "strong beat by the kick count: grid 1/8 early is moved back, bar on 0.93009, no question",
+                       juce::String (e1 * 1000.0, 1) + " ms, kick shift " + juce::String (pc.halfShifted ? "yes" : "no"));
+                auto gk = g, bk = bars; PhaseCheck pk;
+                settleByKickHits (kk, gk, bk, pk);
+                double e2 = 1; for (double b : bk) if (b > 0.5) { const double x = (b - T0) / (4 * T); e2 = std::abs (x - std::round (x)) * 4 * T; break; }
+                // v5 (сырой трекер) — сетка уже верная, не трогать; v6/v7 — сетка прежних ремонтов на полдоли мимо, бочка её возвращает
+                const bool raw = juce::String (name).contains ("_v5_");
+                check (name, e2 < 0.003 && (! raw || ! pk.halfShifted), raw ? "right grid is left as it is" : "grid of the old repairs (1/8 off) is put right by the kick",
+                       juce::String (e2 * 1000.0, 1) + " ms, kick shift " + juce::String (pk.halfShifted ? "yes" : "no"));
+            }
             double worst = 0; int worstGroup = 0;
             for (int grp = 0; grp < 19; ++grp)
             {

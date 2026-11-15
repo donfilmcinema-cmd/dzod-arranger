@@ -11,7 +11,7 @@ namespace dzod
 {
 namespace arranger
 {
-static const char* kEngineVersion = "0.9.3";
+static const char* kEngineVersion = "0.9.4";
 using stemmer::Stemmer;
 
 namespace
@@ -585,7 +585,7 @@ bool Engine::analyseVersion (Version& v, const juce::File& cacheDir, Progress pr
     // ключ кэша — файлы и роли (одинаковые id «V1» у разных песен не путаются)
     juce::String key; for (auto& s : v.stems) key << s.file.getFullPathName() << "|" << s.file.getSize() << "|" << s.file.getLastModificationTime().toMilliseconds() << "|" << s.role << ";";
     const auto base = juce::File::createLegalFileName (v.id) + "_" + juce::String::toHexString (key.hashCode64());
-    const auto cache = cacheDir.getChildFile (base + "_dzod_stemmer_v9.json");   // v9 (0.9.3): ровная сетка по ударам Stemmer (R14 AFTP)
+    const auto cache = cacheDir.getChildFile (base + "_dzod_stemmer_v10.json");   // v10 (0.9.4): сильная доля по счёту бочки
     const auto meta = cacheDir.getChildFile (base + "_meta_v3.json");
     if (cache.existsAsFile() && meta.existsAsFile() && readMeta (v, meta))
     {   // быстрый путь: версия уже разбиралась — звук не читаем
@@ -597,6 +597,7 @@ bool Engine::analyseVersion (Version& v, const juce::File& cacheDir, Progress pr
             v.grid = A.grid; v.bars = A.bars; v.sections = A.sections;
             v.bpm = A.tempoEstimate > 0 ? A.tempoEstimate : A.bpmMedian; v.bpmMin = A.bpmMin; v.bpmMax = A.bpmMax;
             v.gridFixedBars = readFixedBars (cache);
+            if (juce::JSON::parse (cache.loadFileAsString()).hasProperty ("arrangerSteadyPeriod")) v.gridFixedBars.clear();
             v.analysed = true;
             say (1.0f, juce::String ("Ready (cached): ") + v.id);
             return true;
@@ -675,7 +676,9 @@ bool Engine::analyseVersion (Version& v, const juce::File& cacheDir, Progress pr
             const bool fixed = fit.steady || regularizeGrid (grid, bars, v.gridFixedBars);
             v.steadyGrid = fit.steady;
             v.phase = checkPhase (*d, sr, grid, bars, st.analysis().musicStart);
-            if (fixed || v.phase.halfShifted || v.phase.barChanged || grid.size() != g0)
+            const bool byKicks = settleByKickHits (kkH, grid, bars, v.phase);   // явный перевес бочки — решает сам, не спрашивает (sound 16.11)
+            if (fit.steady) v.gridFixedBars.clear();   // ровная сетка принята — «beat grid fixed» не показывать (sound 16.11, ложная тревога)
+            if (fixed || byKicks || v.phase.halfShifted || v.phase.barChanged || grid.size() != g0)
             {
                 auto j = juce::JSON::parse (cache.loadFileAsString());
                 if (auto* o = j.getDynamicObject())
@@ -700,7 +703,7 @@ bool Engine::analyseVersion (Version& v, const juce::File& cacheDir, Progress pr
     v.analysisFile = cache;
     v.grid = A.grid; v.bars = A.bars; v.sections = A.sections;
     v.bpm = A.tempoEstimate > 0 ? A.tempoEstimate : A.bpmMedian; v.bpmMin = A.bpmMin; v.bpmMax = A.bpmMax;
-    if (v.gridFixedBars.empty()) v.gridFixedBars = readFixedBars (cache);
+    if (v.gridFixedBars.empty() && ! v.steadyGrid) v.gridFixedBars = readFixedBars (cache);
 
     say (0.85f, juce::String ("Key: ") + v.id);
     std::vector<const juce::AudioBuffer<float>*> harm;

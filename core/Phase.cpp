@@ -338,4 +338,50 @@ PhaseCheck checkPhase (const juce::AudioBuffer<float>& d, double sr, std::vector
     r.kickOnBeatsPct = after.kickOnBeatsPct; r.kickOnBarStartPct = after.kickOnBarStartPct;
     return r;
 }
+
+bool settleByKickHits (const std::vector<double>& kicks, std::vector<double>& grid, std::vector<double>& bars, PhaseCheck& r)
+{
+    if (grid.size() < 16 || kicks.size() < 20) return false;
+    std::vector<double> d; for (size_t i = 0; i + 1 < grid.size(); ++i) d.push_back (grid[i + 1] - grid[i]);
+    std::nth_element (d.begin(), d.begin() + (long) d.size() / 2, d.end());
+    const double p = d[d.size() / 2], tol = 0.12 * p;
+    auto nearest = [&] (const std::vector<double>& g, double t) { auto it = std::lower_bound (g.begin(), g.end(), t); size_t k = (size_t) (it - g.begin());
+        if (k >= g.size()) k = g.size() - 1; if (k > 0 && std::abs (g[k - 1] - t) < std::abs (g[k] - t)) --k; return k; };
+    bool changed = false;
+    // 1) на долях или между ними
+    int on = 0, off = 0;
+    for (double t : kicks)
+    {
+        const size_t k = nearest (grid, t);
+        const double r0 = t - grid[k];
+        if (std::abs (r0) <= tol) ++on;
+        else if (std::abs (std::abs (r0) - p / 2) <= tol) ++off;
+    }
+    if (off >= 20 && off * 2 >= on * 3)
+    {
+        std::vector<double> g2;
+        if (grid[0] - p / 2 >= 0) g2.push_back (grid[0] - p / 2);
+        for (size_t i = 0; i + 1 < grid.size(); ++i) g2.push_back ((grid[i] + grid[i + 1]) / 2);
+        g2.push_back (grid.back() + p / 2);
+        grid = g2; r.halfShifted = ! r.halfShifted; changed = true;
+    }
+    // 2) начало такта: доля с самым большим числом бочек
+    int cnt[4] = { 0, 0, 0, 0 };
+    for (double t : kicks) { const size_t k = nearest (grid, t); if (std::abs (t - grid[k]) <= tol) ++cnt[k % 4]; }
+    int best = 0; for (int k = 1; k < 4; ++k) if (cnt[k] > cnt[best]) best = k;
+    int second = 0; for (int k = 0; k < 4; ++k) if (k != best) second = juce::jmax (second, cnt[k]);
+    if (cnt[best] >= 20 && cnt[best] * 10 >= second * 13)
+    {
+        const int current = bars.empty() ? -1 : (int) (nearest (grid, bars[0]) % 4);
+        const bool onGrid = ! bars.empty() && std::abs (grid[nearest (grid, bars[0])] - bars[0]) < 0.02;
+        if (current != best || ! onGrid || changed)
+        {
+            std::vector<double> b2; for (size_t i = (size_t) best; i < grid.size(); i += 4) b2.push_back (grid[i]);
+            bars = b2; r.barChanged = true; changed = true;
+        }
+        r.barPhase = best;
+        r.ambiguous = false;
+    }
+    return changed;
+}
 } // namespace dzod::arranger
