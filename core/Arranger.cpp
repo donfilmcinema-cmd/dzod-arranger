@@ -11,7 +11,7 @@ namespace dzod
 {
 namespace arranger
 {
-static const char* kEngineVersion = "0.9.4";
+static const char* kEngineVersion = "0.9.5";
 using stemmer::Stemmer;
 
 namespace
@@ -585,7 +585,7 @@ bool Engine::analyseVersion (Version& v, const juce::File& cacheDir, Progress pr
     // ключ кэша — файлы и роли (одинаковые id «V1» у разных песен не путаются)
     juce::String key; for (auto& s : v.stems) key << s.file.getFullPathName() << "|" << s.file.getSize() << "|" << s.file.getLastModificationTime().toMilliseconds() << "|" << s.role << ";";
     const auto base = juce::File::createLegalFileName (v.id) + "_" + juce::String::toHexString (key.hashCode64());
-    const auto cache = cacheDir.getChildFile (base + "_dzod_stemmer_v10.json");   // v10 (0.9.4): сильная доля по счёту бочки
+    const auto cache = cacheDir.getChildFile (base + "_dzod_stemmer_v11.json");   // v11 (0.9.5): плывущий барабанщик — не ровная сетка; v10 (0.9.4): сильная доля по счёту бочки
     const auto meta = cacheDir.getChildFile (base + "_meta_v3.json");
     if (cache.existsAsFile() && meta.existsAsFile() && readMeta (v, meta))
     {   // быстрый путь: версия уже разбиралась — звук не читаем

@@ -167,7 +167,20 @@ SteadyFit fitSteadyGridHits (const std::vector<double>& sn, const std::vector<do
         if (all < 4) continue;
         ++windows;
         { auto r2 = res; std::sort (r2.begin(), r2.end()); steadyFitDebug().add (juce::String (w0, 1) + " s: hits " + juce::String (all) + ", on grid " + juce::String ((int) res.size()) + (r2.empty() ? juce::String() : ", median " + juce::String (r2[r2.size() / 2] * 1000, 1) + " ms")); }
-        if ((int) res.size() * 2 < all) { ++unclear; continue; }      // сбивка шестнадцатыми / триолями — окно не судит
+        if ((int) res.size() * 2 < all)
+        {
+            // сбивка шестнадцатыми / триолями — окно не судит; но удары не на 16-х и не на триолях — барабанщик плывёт от прямой
+            // (StudioTest «138.7 → 140, плывёт ±40 мс в тактах 9–16»: с 0.9.1 ровная сетка ошибочно принималась)
+            int fine = 0;
+            for (double h : chk) if (h >= w0 && h < w0 + 8.0)
+            {
+                const double q16 = m / 4, q12 = m / 3;
+                const double r16 = h - (t0 + std::round ((h - t0) / q16) * q16), r12 = h - (t0 + std::round ((h - t0) / q12) * q12);
+                if (std::abs (r16) <= 0.010 || std::abs (r12) <= 0.010) ++fine;
+            }
+            if (fine * 2 < all) ++bad; else ++unclear;
+            continue;
+        }
         std::nth_element (res.begin(), res.begin() + (long) res.size() / 2, res.end());
         const double md = std::abs (res[res.size() / 2]) * 1000;
         const bool edgeW = w0 == chk.front() || w0 + 8.0 >= chk.back();
@@ -176,6 +189,20 @@ SteadyFit fitSteadyGridHits (const std::vector<double>& sn, const std::vector<do
         // R14 AFTP (sound 16.11): вступление (такты 1–4) малый играет свободнее (+4…+13 мс от ровной сетки), остальная песня ±2 мс —
         // первое и последнее окна судятся мягче (≤ 15 мс), остальные — ≤ 5 мс
         if (md > (edgeW ? 15.0 : 5.0)) ++bad;   // край в worst не идёт
+        // разброс: медиана |отклонения| каждого удара от ближайшей 8-й / 16-й / триоли. Барабанщик плывёт синусом ±40 мс —
+        // знаковая медиана ≈ 0, а разброс ≈ 20 мс (StudioTest «138.7 → 140, плывёт ±40 мс»; с 0.9.1 сетка принималась ровной)
+        if (! edgeW)
+        {
+            std::vector<double> ad;
+            for (double h : chk) if (h >= w0 && h < w0 + 8.0)
+            {
+                const double q16 = m / 4, q12 = m / 3;
+                ad.push_back (juce::jmin (std::abs (h - (t0 + std::round ((h - t0) / q16) * q16)), std::abs (h - (t0 + std::round ((h - t0) / q12) * q12))));
+            }
+            std::nth_element (ad.begin(), ad.begin() + (long) ad.size() / 2, ad.end());
+            const double spread = ad[ad.size() / 2] * 1000;
+            if (spread > 10.0) { ++bad; worst = juce::jmax (worst, spread); }
+        }
     }
     F.period = m; F.windows = windows; F.worstWindowMs = worst; F.hits = used;
     if (windows < 4 || bad > 0 || unclear * 4 > windows) { if (unclear * 4 > windows) F.worstWindowMs = juce::jmax (F.worstWindowMs, 30.0); return F; }
