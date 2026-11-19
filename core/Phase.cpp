@@ -145,6 +145,29 @@ namespace
         return e[e.size() / 2] * 1000;
     }
 
+    /** Худшее окно 8 с: медиана |отклонения| ударов от шестнадцатых (мс), окна с ≥ 8 ударами. */
+    double gridWorstWindowMs (const std::vector<double>& hits, const std::vector<double>& g)
+    {
+        if (hits.empty() || g.size() < 2) return 1e9;
+        double worst = 0;
+        for (double w0 = hits.front(); w0 < hits.back(); w0 += 8.0)
+        {
+            std::vector<double> e;
+            for (double h : hits)
+            {
+                if (h < w0 || h >= w0 + 8.0) continue;
+                auto it = std::upper_bound (g.begin(), g.end(), h);
+                if (it == g.begin() || it == g.end()) continue;
+                const double a = *(it - 1), q = (*it - a) / 4;
+                e.push_back (std::abs (h - (a + std::round ((h - a) / q) * q)));
+            }
+            if (e.size() < 8) continue;
+            std::nth_element (e.begin(), e.begin() + (long) e.size() / 2, e.end());
+            worst = juce::jmax (worst, e[e.size() / 2] * 1000);
+        }
+        return worst;
+    }
+
     /** Живая сетка по ударам (sound 20.11, LOBB 01: темп Suno плывёт к краям на 15–36 мс, трекер ошибается на 1/16):
         прямая МНК (t0, m) + плавная поправка по окнам 6 с — медиана отклонения ударов от восьмых, 3 прохода, захват 95 → 35 мс. */
     bool warpByHits (const std::vector<double>& hits, double m, double t0, double from, double to, std::vector<double>& out, double& qualityMs)
@@ -285,7 +308,15 @@ SteadyFit fitSteadyGridHits (const std::vector<double>& sn, const std::vector<do
         // ровной нет — живая по ударам, если она точнее сетки трекера (≤ 6 мс и лучше трекера)
         std::vector<double> wg; double q = 0;
         const double trackerMs = gridErrMs (hits, grid);
-        if (allowWarp && warpByHits (hits, m, t0, grid.front(), grid.back(), wg, q) && q <= 6.0 && q < trackerMs - 0.5)
+        // и ни одно окно 8 с не хуже трекера (барабанщик плывёт синусом ±40 мс — трекер идёт за ним, плавная поправка нет: StudioTest)
+        bool warpOk = allowWarp && warpByHits (hits, m, t0, grid.front(), grid.back(), wg, q) && q <= 6.0 && q < trackerMs - 0.5;
+        if (warpOk)
+        {
+            const double ww = gridWorstWindowMs (hits, wg), tw = gridWorstWindowMs (hits, grid);
+            steadyFitDebug().add ("worst 8 s window: warped " + juce::String (ww, 1) + " ms, tracker " + juce::String (tw, 1) + " ms");
+            warpOk = ww <= 8.0 || ww < tw - 1.0;
+        }
+        if (warpOk)
         {
             steadyFitDebug().add ("warped by hits: " + juce::String (q, 1) + " ms (tracker " + juce::String (trackerMs, 1) + " ms)");
             // такты: фаза — голосованием тактов трекера (до 4 долей)
