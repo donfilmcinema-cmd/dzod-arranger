@@ -47,6 +47,7 @@ struct Version
     std::vector<double> grid, bars;   // доли и сильные доли, с
     std::vector<dzod::stemmer::Section> sections;
     Key key;
+    bool tempoDoubled = false;        // малый был на «и» — темп вдвое (98 → 196), сетка удвоена (sound 20.11)
     bool steadyGrid = false;          // ровная песня: сетка — прямая по ударам (период и фаза по всей песне)
     std::vector<int> gridFixedBars;   // такты (с 1), где сетка долей исправлена по счёту долей (лишняя/пропущенная доля) — предупреждение автору
     PhaseCheck phase;                 // проверка сильной доли по барабанам (при первом разборе; из кэша — не заполняется)
@@ -79,6 +80,8 @@ struct TempoProposal
     double median = 0;                // медиана, взвешенная длиной кусков, округлена до 0,1
     double drumsSample = 0;           // темп куска-образца барабанов (0 — образец Drums явно не выбран)
     double proposed = 0;              // что ставить в поле BPM: образец барабанов, иначе медиана
+    double alternative = 0;           // второй вариант: вдвое медленнее, если темп удвоен по малому (sound 20.11)
+    juce::String alternativeWhy;
 };
 
 struct Project

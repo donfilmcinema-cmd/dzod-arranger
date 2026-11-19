@@ -14,6 +14,8 @@ struct PhaseCheck
     double kickOnDb = 0, kickOffDb = 0;      // энергия бочки на долях / между долями (по всей песне), дБ
     double snareOnDb = 0, snareOffDb = 0;    // то же для малого
     bool halfShifted = false;                // сетка сдвинута на полдоли
+    bool doubled = false;                    // темп удвоен: малый на «и» → доли вдвое чаще, малый на 2 и 4 (sound 20.11, ALL AGAINST ALL 07: 98 → 196)
+    int snareOnBeats = 0, snareOffBeats = 0; // удары малого на долях / на «и»
     int barPhase = 0;                        // начало такта — доля с номером barPhase (0..3) от начала сетки
     double barMarginDb = 0;                  // насколько выбранная фаза такта сильнее следующей
     bool barChanged = false;                 // такты Stemmer заменены
@@ -32,6 +34,10 @@ PhaseCheck checkPhase (const juce::AudioBuffer<float>& drums, double sampleRate,
 // kicks — удары бочки Stemmer. Бочки между долями ≥ 1.5× больше, чем на долях (и ≥ 20) — сетка на полдоли; начало такта —
 // доля (0..3), где бочек ≥ 1.3× больше, чем на любой другой. Явный перевес — решает сам, r.ambiguous снимается. true — что-то поменял.
 bool settleByKickHits (const std::vector<double>& kicks, std::vector<double>& grid, std::vector<double>& bars, PhaseCheck& r);
+
+/** Малый в основном на «и» (≥ 1,5× больше, чем на долях, и ≥ 20 ударов) — темп вдвое выше: между долями вставляются середины,
+    такт — 4 новые доли (малый на 2 и 4). sound 20.11 (ALL AGAINST ALL 07): по ощущению 196, анализ давал 98. true — сетка удвоена. */
+bool doubleBySnare (const std::vector<double>& snare, std::vector<double>& grid, std::vector<double>& bars, PhaseCheck& r);
 
 // Счёт долей (sound 15.11, AFTP: на тактах 53–58 трекер вставил лишнюю долю — 25 долей там, где играют 24, доли 0,38–0,41 с вместо 0,435):
 // участок, где доли короче 0,9 или длиннее 1,1 местной медианы, пересчитывается ровно — столько долей, сколько помещается по медиане;

@@ -411,4 +411,34 @@ bool settleByKickHits (const std::vector<double>& kicks, std::vector<double>& gr
     }
     return changed;
 }
+bool doubleBySnare (const std::vector<double>& snare, std::vector<double>& grid, std::vector<double>& bars, PhaseCheck& r)
+{
+    r.snareOnBeats = r.snareOffBeats = 0;
+    if (grid.size() < 8 || bars.size() < 2) return false;
+    for (double t : snare)
+    {
+        auto it = std::upper_bound (grid.begin(), grid.end(), t);
+        if (it == grid.begin() || it == grid.end()) continue;
+        const double a = *(it - 1), b = *it, f = (t - a) / (b - a);
+        if (f < 0.15 || f > 0.85) ++r.snareOnBeats;
+        else if (std::abs (f - 0.5) < 0.15) ++r.snareOffBeats;
+    }
+    if (r.snareOffBeats < 20 || r.snareOffBeats < 1.5 * r.snareOnBeats) return false;
+    std::vector<double> g;
+    for (size_t i = 0; i < grid.size(); ++i)
+    {
+        g.push_back (grid[i]);
+        if (i + 1 < grid.size()) g.push_back (0.5 * (grid[i] + grid[i + 1]));
+    }
+    // такты: от каждого старого такта — каждые 4 новые доли
+    std::vector<double> nb;
+    auto idx = [&g] (double t) { size_t k = 0; for (size_t j = 0; j < g.size(); ++j) if (std::abs (g[j] - t) < std::abs (g[k] - t)) k = j; return k; };
+    size_t start = idx (bars.front());
+    while (start >= 4) start -= 4;
+    for (size_t j = start; j < g.size(); j += 4) nb.push_back (g[j]);
+    grid = std::move (g); bars = std::move (nb);
+    r.doubled = true;
+    return true;
+}
+
 } // namespace dzod::arranger

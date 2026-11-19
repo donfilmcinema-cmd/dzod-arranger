@@ -501,6 +501,33 @@ int main (int argc, char** argv)
         out ("beats: " + juce::String ((int) g0.size()) + " -> " + juce::String ((int) g.size()) + ", first bar " + (bars.empty() ? juce::String ("-") : juce::String (bars[0], 5)));
         return 0;
     }
+    if (cmd == "doubletest")
+    {   // R15 (sound 20.11, ALL AGAINST ALL 07): малый на «и» → темп вдвое; малый на 2 и 4 (AFTP и др.) — не трогать
+        int fails = 0;
+        auto ok = [&] (bool c, const juce::String& m) { out ((c ? "  ok    " : "  FAIL  ") + m); if (! c) ++fails; };
+        const double beat = 60.0 / 98.0, t0 = 0.905;
+        auto make = [&] (std::vector<double>& g, std::vector<double>& b) { g.clear(); b.clear(); for (int i = 0; i < 232; ++i) { g.push_back (t0 + i * beat); if (i % 4 == 0) b.push_back (t0 + i * beat); } };
+        std::vector<double> g, b, sn;
+        make (g, b);
+        for (int i = 0; i < 230; ++i) sn.push_back (t0 + (i + 0.5) * beat + 0.004 * ((i % 3) - 1));   // малый на каждом «и»
+        PhaseCheck r;
+        const bool d = doubleBySnare (sn, g, b, r);
+        ok (d && r.doubled, "snare on the \"and\" -> doubled (" + juce::String (r.snareOnBeats) + "/" + juce::String (r.snareOffBeats) + ")");
+        ok (g.size() == 463 && std::abs ((g[1] - g[0]) - beat / 2) < 1e-9, "grid: every half beat (" + juce::String ((int) g.size()) + ")");
+        ok (! b.empty() && std::abs (b[0] - t0) < 1e-9 && std::abs ((b[1] - b[0]) - 2 * beat) < 1e-9, "bars: 4 new beats from the old bar");
+        int onNew2or4 = 0; for (double t : sn) { auto it = std::upper_bound (b.begin(), b.end(), t + 1e-3); if (it == b.begin()) continue; const double f = (t - *(it - 1)) / (beat / 2); const int k = (int) std::lround (f); if (k == 1 || k == 3) ++onNew2or4; }
+        ok (onNew2or4 > 220, "snare on new 2 and 4: " + juce::String (onNew2or4));
+        make (g, b); sn.clear();
+        for (int i = 0; i < 230; ++i) if (i % 2 == 1) sn.push_back (t0 + i * beat);   // малый на 2 и 4
+        PhaseCheck r2;
+        ok (! doubleBySnare (sn, g, b, r2) && g.size() == 232, "snare on 2 and 4 -> not doubled");
+        make (g, b); sn.clear();
+        for (int i = 0; i < 230; ++i) { if (i % 2 == 1) sn.push_back (t0 + i * beat); if (i % 4 == 3) sn.push_back (t0 + (i + 0.5) * beat); }   // 2 и 4 + форшлаги на «и»
+        PhaseCheck r3;
+        ok (! doubleBySnare (sn, g, b, r3), "snare on 2 and 4 with ghost notes on the \"and\" -> not doubled");
+        out (fails == 0 ? "doubletest: 6/6 passed" : "doubletest: FAILED " + juce::String (fails));
+        return fails == 0 ? 0 : 1;
+    }
     if (cmd == "aftp" && argc >= 3)
     {   // R14 на данных автора (sound 16.11, shared/docs/arranger/R14-AFTP): удары Stemmer из кэшей v5/v6/v7 → fitSteadyGridHits;
         // приёмка: 138.000 BPM (доля 0.4347822 ± 1 мкс), такты каждые 4 доли от 0.93009 ± 2 мс, малый (корпус > 0.7) на сетке ≤ 5 мс (медиана)

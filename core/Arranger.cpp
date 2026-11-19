@@ -11,7 +11,7 @@ namespace dzod
 {
 namespace arranger
 {
-static const char* kEngineVersion = "0.9.5";
+static const char* kEngineVersion = "0.9.6";
 using stemmer::Stemmer;
 
 namespace
@@ -585,7 +585,7 @@ bool Engine::analyseVersion (Version& v, const juce::File& cacheDir, Progress pr
     // ключ кэша — файлы и роли (одинаковые id «V1» у разных песен не путаются)
     juce::String key; for (auto& s : v.stems) key << s.file.getFullPathName() << "|" << s.file.getSize() << "|" << s.file.getLastModificationTime().toMilliseconds() << "|" << s.role << ";";
     const auto base = juce::File::createLegalFileName (v.id) + "_" + juce::String::toHexString (key.hashCode64());
-    const auto cache = cacheDir.getChildFile (base + "_dzod_stemmer_v11.json");   // v11 (0.9.5): плывущий барабанщик — не ровная сетка; v10 (0.9.4): сильная доля по счёту бочки
+    const auto cache = cacheDir.getChildFile (base + "_dzod_stemmer_v12.json");   // v12 (0.9.6): малый на «и» — темп вдвое; v11 (0.9.5): плывущий барабанщик — не ровная сетка; v10 (0.9.4): сильная доля по счёту бочки
     const auto meta = cacheDir.getChildFile (base + "_meta_v3.json");
     if (cache.existsAsFile() && meta.existsAsFile() && readMeta (v, meta))
     {   // быстрый путь: версия уже разбиралась — звук не читаем
@@ -597,7 +597,11 @@ bool Engine::analyseVersion (Version& v, const juce::File& cacheDir, Progress pr
             v.grid = A.grid; v.bars = A.bars; v.sections = A.sections;
             v.bpm = A.tempoEstimate > 0 ? A.tempoEstimate : A.bpmMedian; v.bpmMin = A.bpmMin; v.bpmMax = A.bpmMax;
             v.gridFixedBars = readFixedBars (cache);
-            if (juce::JSON::parse (cache.loadFileAsString()).hasProperty ("arrangerSteadyPeriod")) v.gridFixedBars.clear();
+            {
+                const auto cj = juce::JSON::parse (cache.loadFileAsString());
+                if (cj.hasProperty ("arrangerSteadyPeriod")) { v.gridFixedBars.clear(); v.steadyGrid = true; }
+                v.tempoDoubled = (bool) cj["arrangerDoubled"];
+            }
             v.analysed = true;
             say (1.0f, juce::String ("Ready (cached): ") + v.id);
             return true;
@@ -677,8 +681,9 @@ bool Engine::analyseVersion (Version& v, const juce::File& cacheDir, Progress pr
             v.steadyGrid = fit.steady;
             v.phase = checkPhase (*d, sr, grid, bars, st.analysis().musicStart);
             const bool byKicks = settleByKickHits (kkH, grid, bars, v.phase);   // явный перевес бочки — решает сам, не спрашивает (sound 16.11)
+            const bool dbl = doubleBySnare (snH, grid, bars, v.phase);           // малый на «и» — темп вдвое (sound 20.11, ALL AGAINST ALL 07: 98 → 196)
             if (fit.steady) v.gridFixedBars.clear();   // ровная сетка принята — «beat grid fixed» не показывать (sound 16.11, ложная тревога)
-            if (fixed || byKicks || v.phase.halfShifted || v.phase.barChanged || grid.size() != g0)
+            if (fixed || byKicks || dbl || v.phase.halfShifted || v.phase.barChanged || grid.size() != g0)
             {
                 auto j = juce::JSON::parse (cache.loadFileAsString());
                 if (auto* o = j.getDynamicObject())
@@ -691,7 +696,15 @@ bool Engine::analyseVersion (Version& v, const juce::File& cacheDir, Progress pr
                         o->setProperty ("arrangerSteadyPeriod", fit.period); o->setProperty ("arrangerSteadyWorstMs", fit.worstWindowMs);
                         for (auto* k : { "bpmMin", "bpmMedian", "bpmMax", "tempoEstimate" }) o->setProperty (k, 60.0 / fit.period);
                     }
-                    o->setProperty ("arrangerPhase", juce::String (v.phase.halfShifted ? "half-beat shifted; " : "") + (v.phase.barChanged ? "bars by kick+crash" : ""));
+                    if (dbl)
+                    {   // темп вдвое: все оценки темпа ×2, период ровной сетки /2
+                        for (auto* k : { "bpmMin", "bpmMedian", "bpmMax", "tempoEstimate" }) o->setProperty (k, 2.0 * (double) o->getProperty (k));
+                        if (fit.steady) o->setProperty ("arrangerSteadyPeriod", fit.period / 2.0);
+                        o->setProperty ("arrangerDoubled", true);
+                        o->setProperty ("arrangerSnareOnOff", juce::String (v.phase.snareOnBeats) + "/" + juce::String (v.phase.snareOffBeats));
+                    }
+                    o->setProperty ("arrangerPhase", juce::String (v.phase.halfShifted ? "half-beat shifted; " : "") + (v.phase.barChanged ? "bars by kick+crash" : "")
+                                                     + (dbl ? "; tempo doubled - the snare on 2 and 4" : ""));
                     cache.replaceWithText (juce::JSON::toString (j));
                     if (! st.readAnalysis (cache)) { error = st.lastError(); return false; }
                 }
@@ -704,6 +717,7 @@ bool Engine::analyseVersion (Version& v, const juce::File& cacheDir, Progress pr
     v.grid = A.grid; v.bars = A.bars; v.sections = A.sections;
     v.bpm = A.tempoEstimate > 0 ? A.tempoEstimate : A.bpmMedian; v.bpmMin = A.bpmMin; v.bpmMax = A.bpmMax;
     if (v.gridFixedBars.empty() && ! v.steadyGrid) v.gridFixedBars = readFixedBars (cache);
+    v.tempoDoubled = (bool) juce::JSON::parse (cache.loadFileAsString())["arrangerDoubled"];
 
     say (0.85f, juce::String ("Key: ") + v.id);
     std::vector<const juce::AudioBuffer<float>*> harm;
@@ -783,6 +797,14 @@ TempoProposal Engine::analyseTempo (const Project& p, double song)
     const int s = it != p.samples.end() ? it->second : -1;
     if (s >= 0 && s < (int) r.pieceBpm.size()) r.drumsSample = std::round (r.pieceBpm[(size_t) s] * 10.0) / 10.0;
     r.proposed = r.drumsSample > 0 ? r.drumsSample : r.median;
+    // темп удвоен по малому (sound 20.11) — второй вариант: вдвое медленнее
+    for (auto& pc : p.pieces)
+        if (const auto* v = p.findVersion (pc.version); v != nullptr && v->tempoDoubled && r.proposed > 0)
+        {
+            r.alternative = std::round (r.proposed * 5.0) / 10.0;
+            r.alternativeWhy = juce::String (r.proposed, 1) + " - the snare on 2 and 4; at " + juce::String (r.alternative, 1) + " the snare is on the \"and\"";
+            break;
+        }
     const double ref = song > 0 ? song : r.proposed;
     for (double b : r.pieceBpm) r.deviationPct.push_back (b > 0 && ref > 0 ? 100.0 * (b - ref) / ref : 0.0);
     return r;
