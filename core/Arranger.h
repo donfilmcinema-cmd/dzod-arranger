@@ -190,6 +190,8 @@ public:
     // beats = ±0.5 — вся сетка долей и тактов сдвигается на полдоли; ±1, ±2, ±3 — начало такта переходит на другую долю.
     // Пишет поправку в кэш анализа (analysisFile), обновляет v.grid / v.bars. Куски на столе не трогает — после сдвига ALIGN заново.
     static bool moveDownbeat (Version&, double beats, juce::String& error);
+    // ×2 / ÷2 (sound 20.11): та же музыка, доли вдвое чаще (factor 2) или реже (factor -2) — сетка и такты версии, растяжки нет
+    static bool scaleTempo (Version&, int factor, juce::String& error);
     // Темп песни: заданный в проекте или темп образца барабанов (по его долям).
     static double songBpm (const Project&);
     // TEMPO ANALYSE: темп каждого куска и предложение.

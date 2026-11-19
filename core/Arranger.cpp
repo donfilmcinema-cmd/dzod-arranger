@@ -768,6 +768,40 @@ bool Engine::moveDownbeat (Version& v, double beats, juce::String& error)
     return true;
 }
 
+bool Engine::scaleTempo (Version& v, int factor, juce::String& error)
+{
+    if (! v.analysed || v.grid.size() < 8 || v.bars.size() < 2) { error = "The variant is not analysed"; return false; }
+    std::vector<double> grid, bars;
+    auto nearest = [] (const std::vector<double>& g, double t) { size_t k = 0; for (size_t j = 0; j < g.size(); ++j) if (std::abs (g[j] - t) < std::abs (g[k] - t)) k = j; return k; };
+    if (factor == 2)
+    {
+        for (size_t i = 0; i < v.grid.size(); ++i) { grid.push_back (v.grid[i]); if (i + 1 < v.grid.size()) grid.push_back (0.5 * (v.grid[i] + v.grid[i + 1])); }
+        size_t s = nearest (grid, v.bars.front()); while (s >= 4) s -= 4;
+        for (size_t j = s; j < grid.size(); j += 4) bars.push_back (grid[j]);
+    }
+    else if (factor == -2)
+    {
+        const size_t b0 = nearest (v.grid, v.bars.front());
+        for (size_t j = b0 % 2; j < v.grid.size(); j += 2) grid.push_back (v.grid[j]);
+        for (size_t j = 0; j < v.bars.size(); j += 2) bars.push_back (v.bars[j]);
+    }
+    else { error = "factor 2 or -2"; return false; }
+    if (bars.size() < 2) { error = "Too few bars for half tempo"; return false; }
+    auto j = juce::JSON::parse (v.analysisFile.loadFileAsString());
+    auto* o = j.getDynamicObject();
+    if (o == nullptr) { error = "Cannot read " + v.analysisFile.getFullPathName(); return false; }
+    const double k = factor == 2 ? 2.0 : 0.5;
+    o->setProperty ("grid", arr (grid)); o->setProperty ("bars", arr (bars));
+    for (auto* key : { "bpmMin", "bpmMedian", "bpmMax", "tempoEstimate" }) o->setProperty (key, k * (double) o->getProperty (key));
+    if (o->hasProperty ("arrangerSteadyPeriod")) o->setProperty ("arrangerSteadyPeriod", (double) o->getProperty ("arrangerSteadyPeriod") / k);
+    const bool doubled = factor == 2 ? ! v.tempoDoubled : false;
+    o->setProperty ("arrangerDoubled", doubled);
+    o->setProperty ("arrangerPhase", juce::String ("tempo ") + (factor == 2 ? "x2" : "/2") + " by the author");
+    if (! v.analysisFile.replaceWithText (juce::JSON::toString (j))) { error = "Cannot write " + v.analysisFile.getFullPathName(); return false; }
+    v.grid = grid; v.bars = bars; v.bpm *= k; v.bpmMin *= k; v.bpmMax *= k; v.tempoDoubled = doubled;
+    return true;
+}
+
 double Engine::songBpm (const Project& p)
 {
     if (p.songBpm > 0) return p.songBpm;
