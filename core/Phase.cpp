@@ -127,7 +127,79 @@ SteadyFit fitSteadyGrid (const juce::AudioBuffer<float>& d, double sr, std::vect
     return fitSteadyGridHits (hitsOf (B.snare), hitsOf (B.kick), grid, bars, fixedBars);
 }
 
-SteadyFit fitSteadyGridHits (const std::vector<double>& sn, const std::vector<double>& kk, std::vector<double>& grid, std::vector<double>& bars, std::vector<int>& fixedBars)
+namespace
+{
+    /** Медиана |отклонения| ударов от ближайшей восьмой сетки (мс) — качество сетки. */
+    double gridErrMs (const std::vector<double>& hits, const std::vector<double>& g)
+    {
+        std::vector<double> e;
+        for (double h : hits)
+        {
+            auto it = std::upper_bound (g.begin(), g.end(), h);
+            if (it == g.begin() || it == g.end()) continue;
+            const double a = *(it - 1), q = (*it - a) / 4;   // шестнадцатые
+            e.push_back (std::abs (h - (a + std::round ((h - a) / q) * q)));
+        }
+        if (e.size() < 20) return 1e9;
+        std::nth_element (e.begin(), e.begin() + (long) e.size() / 2, e.end());
+        return e[e.size() / 2] * 1000;
+    }
+
+    /** Живая сетка по ударам (sound 20.11, LOBB 01: темп Suno плывёт к краям на 15–36 мс, трекер ошибается на 1/16):
+        прямая МНК (t0, m) + плавная поправка по окнам 6 с — медиана отклонения ударов от восьмых, 3 прохода, захват 95 → 35 мс. */
+    bool warpByHits (const std::vector<double>& hits, double m, double t0, double from, double to, std::vector<double>& out, double& qualityMs)
+    {
+        const double W = juce::SystemStats::getEnvironmentVariable ("DZOD_WARPW", "6").getDoubleValue(), half = m / 2;
+        const int nw = (int) std::ceil ((to - from) / W) + 1;
+        std::vector<double> off ((size_t) nw, 0.0);
+        auto offAt = [&] (double t)
+        {
+            const double x = (t - from) / W - 0.5;
+            const int i = juce::jlimit (0, nw - 1, (int) std::floor (x)), j = juce::jmin (nw - 1, i + 1);
+            const double f = juce::jlimit (0.0, 1.0, x - i);
+            return off[(size_t) i] * (1 - f) + off[(size_t) j] * f;
+        };
+        for (double cap : { 0.30 * half, 0.15 * half, 0.035 })
+        {
+            std::vector<double> nxt ((size_t) nw, 0.0);
+            std::vector<char> have ((size_t) nw, 0);
+            for (int w = 0; w < nw; ++w)
+            {
+                std::vector<double> r;
+                for (double h : hits)
+                {
+                    if (h < from + w * W || h >= from + (w + 1) * W) continue;
+                    const double o = offAt (h), n = std::round ((h - t0 - o) / half), rr = h - (t0 + n * half + o);
+                    if (std::abs (rr) <= cap) r.push_back (rr);
+                }
+                if (r.size() < 4) continue;
+                std::nth_element (r.begin(), r.begin() + (long) r.size() / 2, r.end());
+                nxt[(size_t) w] = offAt (from + (w + 0.5) * W) + r[r.size() / 2]; have[(size_t) w] = 1;
+            }
+            // пустые окна — между соседями
+            for (int w = 0; w < nw; ++w)
+                if (! have[(size_t) w])
+                {
+                    int a = w - 1, b = w + 1; while (a >= 0 && ! have[(size_t) a]) --a; while (b < nw && ! have[(size_t) b]) ++b;
+                    nxt[(size_t) w] = a >= 0 && b < nw ? nxt[(size_t) a] + (nxt[(size_t) b] - nxt[(size_t) a]) * (w - a) / (double) (b - a)
+                                    : a >= 0 ? nxt[(size_t) a] : b < nw ? nxt[(size_t) b] : 0.0;
+                }
+            // сглаживание медианой по 3 окнам
+            for (int w = 0; w < nw; ++w)
+            {
+                double a = nxt[(size_t) juce::jmax (0, w - 1)], b = nxt[(size_t) w], c = nxt[(size_t) juce::jmin (nw - 1, w + 1)];
+                off[(size_t) w] = juce::jmax (juce::jmin (a, b), juce::jmin (juce::jmax (a, b), c));
+            }
+        }
+        out.clear();
+        const double k0 = std::floor ((from - t0) / m), k1 = std::ceil ((to - t0) / m);
+        for (double k = k0; k <= k1; k += 1) { const double t = t0 + k * m; out.push_back (t + offAt (t)); }
+        qualityMs = gridErrMs (hits, out);
+        return out.size() > 16;
+    }
+}
+
+SteadyFit fitSteadyGridHits (const std::vector<double>& sn, const std::vector<double>& kk, std::vector<double>& grid, std::vector<double>& bars, std::vector<int>& fixedBars, bool allowWarp)
 {
     SteadyFit F; fixedBars.clear(); steadyFitDebug().clear();
     if (grid.size() < 32) return F;
@@ -205,11 +277,40 @@ SteadyFit fitSteadyGridHits (const std::vector<double>& sn, const std::vector<do
         }
     }
     F.period = m; F.windows = windows; F.worstWindowMs = worst; F.hits = used;
-    if (windows < 4 || bad > 0 || unclear * 4 > windows) { if (unclear * 4 > windows) F.worstWindowMs = juce::jmax (F.worstWindowMs, 30.0); return F; }
+    steadyFitDebug().add ("windows " + juce::String (windows) + ", bad " + juce::String (bad) + ", unclear " + juce::String (unclear));
+    // окна со сбивками (не судят) — до трети песни (LOBB 01: 4 из 15 окон — сбивки, остальное ±4 мс; было «до четверти»)
+    if (windows < 4 || bad > 0 || unclear * 3 > windows)
+    {
+        if (unclear * 3 > windows) F.worstWindowMs = juce::jmax (F.worstWindowMs, 30.0);
+        // ровной нет — живая по ударам, если она точнее сетки трекера (≤ 6 мс и лучше трекера)
+        std::vector<double> wg; double q = 0;
+        const double trackerMs = gridErrMs (hits, grid);
+        if (allowWarp && warpByHits (hits, m, t0, grid.front(), grid.back(), wg, q) && q <= 6.0 && q < trackerMs - 0.5)
+        {
+            steadyFitDebug().add ("warped by hits: " + juce::String (q, 1) + " ms (tracker " + juce::String (trackerMs, 1) + " ms)");
+            // такты: фаза — голосованием тактов трекера (до 4 долей)
+            std::vector<double> b2;
+            if (! bars.empty())
+            {
+                std::vector<int> votes (4, 0);
+                for (double b : bars)
+                {
+                    size_t k = 0; for (size_t j = 0; j < wg.size(); ++j) if (std::abs (wg[j] - b) < std::abs (wg[k] - b)) k = j;
+                    if (std::abs (wg[k] - b) < m * 0.25) ++votes[k % 4];
+                }
+                const int ph = (int) (std::max_element (votes.begin(), votes.end()) - votes.begin());
+                for (size_t q2 = (size_t) ph; q2 < wg.size(); q2 += 4) b2.push_back (wg[q2]);
+            }
+            grid = wg; if (! b2.empty()) bars = b2;
+            F.warped = true; F.warpMs = q; F.phase = t0;
+        }
+        else steadyFitDebug().add ("warp rejected: " + juce::String (q, 1) + " ms (tracker " + juce::String (trackerMs, 1) + " ms)");
+        return F;
+    }
     // фаза — по долям трекера: медиана отклонения долей от прямой (только близкие, < 30 мс) — как сетка была до сбоя
     std::vector<double> off;
     for (double g : grid) { const double nn = std::round ((g - t0) / m), rr = g - (t0 + nn * m); if (std::abs (rr) < 0.03) off.push_back (rr); }
-    if (off.size() * 2 < grid.size()) return F;      // доли трекера не на долях прямой (например, на «и») — не трогаем
+    if (off.size() * 2 < grid.size()) { steadyFitDebug().add ("tracker beats on the line: " + juce::String ((int) off.size()) + " of " + juce::String ((int) grid.size())); return F; }      // доли трекера не на долях прямой (например, на «и») — не трогаем
     std::nth_element (off.begin(), off.begin() + (long) off.size() / 2, off.end());
     t0 += off[off.size() / 2];
     // ровная сетка от первой до последней доли трекера
@@ -423,7 +524,9 @@ bool doubleBySnare (const std::vector<double>& snare, std::vector<double>& grid,
         if (f < 0.15 || f > 0.85) ++r.snareOnBeats;
         else if (std::abs (f - 0.5) < 0.15) ++r.snareOffBeats;
     }
-    if (r.snareOffBeats < 20 || r.snareOffBeats < 1.5 * r.snareOnBeats) return false;
+    // AFTP 01 (138): малый 82 на долях / 222 на «и» — это 138 (автор), не 276; ALL AGAINST ALL 07: 9 / 186 — 196. Удваиваем, только когда
+    // на долях малого почти нет (≤ 10 % от «и»)
+    if (r.snareOffBeats < 20 || r.snareOnBeats * 10 > r.snareOffBeats) return false;
     std::vector<double> g;
     for (size_t i = 0; i < grid.size(); ++i)
     {

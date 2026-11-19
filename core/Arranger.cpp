@@ -1,3 +1,4 @@
+#include <iostream>
 #include "Arranger.h"
 #include "../third_party/stemmer/Mp3Writer.h"
 #include "Stretch.h"
@@ -11,7 +12,7 @@ namespace dzod
 {
 namespace arranger
 {
-static const char* kEngineVersion = "0.9.6";
+static const char* kEngineVersion = "0.9.7";
 using stemmer::Stemmer;
 
 namespace
@@ -585,7 +586,7 @@ bool Engine::analyseVersion (Version& v, const juce::File& cacheDir, Progress pr
     // ключ кэша — файлы и роли (одинаковые id «V1» у разных песен не путаются)
     juce::String key; for (auto& s : v.stems) key << s.file.getFullPathName() << "|" << s.file.getSize() << "|" << s.file.getLastModificationTime().toMilliseconds() << "|" << s.role << ";";
     const auto base = juce::File::createLegalFileName (v.id) + "_" + juce::String::toHexString (key.hashCode64());
-    const auto cache = cacheDir.getChildFile (base + "_dzod_stemmer_v12.json");   // v12 (0.9.6): малый на «и» — темп вдвое; v11 (0.9.5): плывущий барабанщик — не ровная сетка; v10 (0.9.4): сильная доля по счёту бочки
+    const auto cache = cacheDir.getChildFile (base + "_dzod_stemmer_v13.json");   // v13 (0.9.7): живая сетка по ударам, удвоение строже; v12 (0.9.6): малый на «и» — темп вдвое; v11 (0.9.5): плывущий барабанщик — не ровная сетка; v10 (0.9.4): сильная доля по счёту бочки
     const auto meta = cacheDir.getChildFile (base + "_meta_v3.json");
     if (cache.existsAsFile() && meta.existsAsFile() && readMeta (v, meta))
     {   // быстрый путь: версия уже разбиралась — звук не читаем
@@ -675,15 +676,20 @@ bool Engine::analyseVersion (Version& v, const juce::File& cacheDir, Progress pr
             // удары — те, что нашёл Stemmer (малый: корпус > 0.7, бочка > 0.5; на них sound мерит сетку автора), мало — по полосам звука
             std::vector<double> snH, kkH;
             for (auto& h : st.analysis().hits) { if (h.body > 0.7f) snH.push_back (h.t); if (h.kick > 0.5f) kkH.push_back (h.t); }
-            auto fit = snH.size() >= 40 ? fitSteadyGridHits (snH, kkH, grid, bars, v.gridFixedBars) : SteadyFit();
-            if (! fit.steady) { grid = st.analysis().grid; bars = st.analysis().bars; fit = fitSteadyGrid (*d, sr, grid, bars, v.gridFixedBars); }
-            const bool fixed = fit.steady || regularizeGrid (grid, bars, v.gridFixedBars);
+            auto fit = snH.size() >= 40 ? fitSteadyGridHits (snH, kkH, grid, bars, v.gridFixedBars, true) : SteadyFit();
+            if (juce::SystemStats::getEnvironmentVariable ("DZOD_FITDEBUG", {}).isNotEmpty())
+            {
+                std::cerr << "fit (hits): steady " << fit.steady << " period " << fit.period << " worst " << fit.worstWindowMs << " sn " << snH.size() << " kk " << kkH.size() << "\n";
+                for (auto& l : steadyFitDebug()) std::cerr << "   " << l << "\n";
+            }
+            if (! fit.steady && ! fit.warped) { grid = st.analysis().grid; bars = st.analysis().bars; fit = fitSteadyGrid (*d, sr, grid, bars, v.gridFixedBars); }
+            const bool fixed = fit.steady || fit.warped || regularizeGrid (grid, bars, v.gridFixedBars);
             v.steadyGrid = fit.steady;
             v.phase = checkPhase (*d, sr, grid, bars, st.analysis().musicStart);
             const bool byKicks = settleByKickHits (kkH, grid, bars, v.phase);   // явный перевес бочки — решает сам, не спрашивает (sound 16.11)
             const bool dbl = doubleBySnare (snH, grid, bars, v.phase);           // малый на «и» — темп вдвое (sound 20.11, ALL AGAINST ALL 07: 98 → 196)
-            if (fit.steady) v.gridFixedBars.clear();   // ровная сетка принята — «beat grid fixed» не показывать (sound 16.11, ложная тревога)
-            if (fixed || byKicks || dbl || v.phase.halfShifted || v.phase.barChanged || grid.size() != g0)
+            if (fit.steady || fit.warped) v.gridFixedBars.clear();   // ровная (или живая по ударам) сетка принята — «beat grid fixed» не показывать (sound 16.11, ложная тревога)
+            if (fixed || byKicks || dbl || fit.warped || v.phase.halfShifted || v.phase.barChanged || grid.size() != g0)
             {
                 auto j = juce::JSON::parse (cache.loadFileAsString());
                 if (auto* o = j.getDynamicObject())
@@ -695,6 +701,14 @@ bool Engine::analyseVersion (Version& v, const juce::File& cacheDir, Progress pr
                     {   // ровная песня — один темп (в кэше трекер оставлял bpmMax 146 от сбоя); так же у studio 0.9.100
                         o->setProperty ("arrangerSteadyPeriod", fit.period); o->setProperty ("arrangerSteadyWorstMs", fit.worstWindowMs);
                         for (auto* k : { "bpmMin", "bpmMedian", "bpmMax", "tempoEstimate" }) o->setProperty (k, 60.0 / fit.period);
+                    }
+                    if (fit.warped)
+                    {   // живая сетка по ударам (sound 20.11, LOBB 01): темп — по её долям
+                        o->setProperty ("arrangerWarpedMs", fit.warpMs);
+                        std::vector<double> dd; for (size_t k = 0; k + 1 < grid.size(); ++k) dd.push_back (grid[k + 1] - grid[k]);
+                        std::sort (dd.begin(), dd.end());
+                        o->setProperty ("bpmMedian", 60.0 / dd[dd.size() / 2]); o->setProperty ("tempoEstimate", std::round (600.0 / dd[dd.size() / 2]) / 10.0);
+                        o->setProperty ("bpmMin", 60.0 / dd[dd.size() * 95 / 100]); o->setProperty ("bpmMax", 60.0 / dd[dd.size() * 5 / 100]);
                     }
                     if (dbl)
                     {   // темп вдвое: все оценки темпа ×2, период ровной сетки /2

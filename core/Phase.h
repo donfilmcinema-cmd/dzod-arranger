@@ -49,11 +49,12 @@ bool regularizeGrid (std::vector<double>& grid, std::vector<double>& bars, std::
 // фаза — по долям трекера (медиана, как было до сбоя). Проверка: медиана отклонения малого в каждом окне 8 с ≤ 5 мс.
 // Прошла — grid/bars заменяются ровной сеткой (такты — каждые 4 доли от первого такта), fixedBars — такты, где доля сдвинулась > 12 %.
 // Не прошла (живой темп) — ничего не меняет, false.
-struct SteadyFit { bool steady = false; double period = 0, phase = 0, worstWindowMs = 0; int hits = 0, windows = 0; };
+struct SteadyFit { bool steady = false, warped = false; double period = 0, phase = 0, worstWindowMs = 0, warpMs = 0; int hits = 0, windows = 0; };
 juce::StringArray& steadyFitDebug();   // строки разбора последнего fitSteadyGrid (окна 8 с) — для gridfit
 SteadyFit fitSteadyGrid (const juce::AudioBuffer<float>& drums, double sampleRate, std::vector<double>& grid, std::vector<double>& bars, std::vector<int>& fixedBars);
 // То же по готовым ударам: малый (sn) и бочка (kk), времена в с (удары Stemmer из кэша — R14 на данных автора, studio 16.11).
-SteadyFit fitSteadyGridHits (const std::vector<double>& snare, const std::vector<double>& kick, std::vector<double>& grid, std::vector<double>& bars, std::vector<int>& fixedBars);
+SteadyFit fitSteadyGridHits (const std::vector<double>& snare, const std::vector<double>& kick, std::vector<double>& grid, std::vector<double>& bars, std::vector<int>& fixedBars,
+                             bool allowWarp = false);   // allowWarp — живая сетка по ударам Stemmer, если ровной нет (sound 20.11, LOBB 01)
 
 // Только измерить (без правки): для отчётов и проверок.
 PhaseCheck measurePhase (const juce::AudioBuffer<float>& drums, double sampleRate, const std::vector<double>& grid, const std::vector<double>& bars);

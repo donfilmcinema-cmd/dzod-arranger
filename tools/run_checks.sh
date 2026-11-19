@@ -1,8 +1,8 @@
 #!/bin/bash
 # Все проверки движка Arranger перед сборкой (правило «ничего не возвращается», sound 30.10).
-# ./tools/run_checks.sh <DZODArrangerTool> <rigor-suno-versions-2026-10-25> <папка «аудит» с русской копией 04B> <song-sections-2026-10-25> <кэш> <рабочая папка> [THIN AS PAPER Neuro Drums.flac] [папка R14-AFTP (shared/docs/arranger/R14-AFTP)]
+# ./tools/run_checks.sh <DZODArrangerTool> <rigor-suno-versions-2026-10-25> <папка «аудит» с русской копией 04B> <song-sections-2026-10-25> <кэш> <рабочая папка> [THIN AS PAPER Neuro Drums.flac] [папка R14-AFTP (shared/docs/arranger/R14-AFTP)] [shared/docs/arranger/cases — R16]
 set -u
-T="$1"; R="$2"; RU="$3"; SONGS="$4"; C="$5"; W="$6"; THIN="${7:-}"; AFTP="${8:-}"
+T="$1"; R="$2"; RU="$3"; SONGS="$4"; C="$5"; W="$6"; THIN="${7:-}"; AFTP="${8:-}"; CASES="${9:-}"
 rm -rf "$W"; mkdir -p "$W"
 "$T" selftest > "$W/selftest.txt" 2>&1;            s1=$?
 "$T" regress "$R" "$C" "$W/regress" ${THIN:+"$THIN"} > "$W/regress.txt" 2>&1; s2=$?
@@ -10,7 +10,8 @@ rm -rf "$W"; mkdir -p "$W"
 "$T" stress "$R" "$C" "$W/stress" 4 > "$W/stress.txt" 2>&1; s4=$?
 "$T" phasetest "$W/phase" "$W/phase-cache" > "$W/phase.txt" 2>&1; s5=$?
 "$T" doubletest > "$W/double.txt" 2>&1; s7=$?
+s8=0; [ -n "$CASES" ] && { "$T" realcases "$CASES" "$W/real-cache" > "$W/real.txt" 2>&1; s8=$?; }
 s6=0; [ -n "$AFTP" ] && { "$T" aftp "$AFTP" > "$W/aftp.txt" 2>&1; s6=$?; }
-grep -E "^selftest" "$W/selftest.txt"; grep -E "^regressions" "$W/regress.txt"; grep -E "^audit" "$W/audit.txt"; grep -cE "^seed .*: OK" "$W/stress.txt" | sed 's/^/stress OK: /'; grep -E "^phasetest" "$W/phase.txt"; grep -E "^doubletest" "$W/double.txt"; [ -n "$AFTP" ] && grep -E "^aftp" "$W/aftp.txt"
+grep -E "^selftest" "$W/selftest.txt"; grep -E "^regressions" "$W/regress.txt"; grep -E "^audit" "$W/audit.txt"; grep -cE "^seed .*: OK" "$W/stress.txt" | sed 's/^/stress OK: /'; grep -E "^phasetest" "$W/phase.txt"; grep -E "^doubletest" "$W/double.txt"; [ -n "$AFTP" ] && grep -E "^aftp" "$W/aftp.txt"; [ -n "$CASES" ] && grep -E "^realcases" "$W/real.txt"
 grep -hE "FAIL" "$W"/*.txt
-[ $s1 -eq 0 ] && [ $s2 -eq 0 ] && [ $s3 -eq 0 ] && [ $s4 -eq 0 ] && [ $s5 -eq 0 ] && [ $s6 -eq 0 ] && [ $s7 -eq 0 ] && echo "ALL CHECKS PASSED" || { echo "CHECKS FAILED - do not ship"; exit 1; }
+[ $s1 -eq 0 ] && [ $s2 -eq 0 ] && [ $s3 -eq 0 ] && [ $s4 -eq 0 ] && [ $s5 -eq 0 ] && [ $s6 -eq 0 ] && [ $s7 -eq 0 ] && [ $s8 -eq 0 ] && echo "ALL CHECKS PASSED" || { echo "CHECKS FAILED - do not ship"; exit 1; }

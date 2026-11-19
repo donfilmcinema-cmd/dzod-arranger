@@ -528,6 +528,52 @@ int main (int argc, char** argv)
         out (fails == 0 ? "doubletest: 6/6 passed" : "doubletest: FAILED " + juce::String (fails));
         return fails == 0 ? 0 : 1;
     }
+    if (cmd == "realcases" && argc >= 4)
+    {   // R16 (sound 20.11): барабаны песен автора — сетка на ударах. realcases <shared/docs/arranger/cases> <кэш>
+        //   ALL AGAINST ALL 07 → 196 (малый на «и» при 98), ANOTHER FIGURE 01 → 138 ровная, LIBRARY OF BURNED BOOKS 01 → 95 живая по ударам
+        struct Case { const char* dir; double bpm; };
+        const Case cases[] = { { "2026-11-19_all-against-all-07", 196.0 }, { "aftp-01-138", 138.0 }, { "lobb-01-95", 95.0 } };
+        int fails = 0;
+        auto ok = [&] (bool c, const juce::String& m) { out ((c ? "  ok    " : "  FAIL  ") + m); if (! c) ++fails; };
+        for (auto& cs : cases)
+        {
+            const auto dir = juce::File (argv[2]).getChildFile (cs.dir);
+            auto fl = dir.findChildFiles (juce::File::findFiles, false, "*Drums*.flac");
+            if (fl.isEmpty()) { ok (false, juce::String (cs.dir) + ": no drums FLAC"); continue; }
+            auto v = Engine::versionFromFiles (cs.dir, { fl[0] });
+            juce::String err;
+            if (! Engine::analyseVersion (v, juce::File (argv[3]), nullptr, err)) { ok (false, juce::String (cs.dir) + ": " + err); continue; }
+            const auto j = juce::JSON::parse (v.analysisFile.loadFileAsString());
+            const double est = (double) j["tempoEstimate"];
+            ok (std::abs (est - cs.bpm) < 1.0, juce::String (cs.dir) + ": tempo " + juce::String (est, 2) + " (" + juce::String (cs.bpm, 0) + ")");
+            // удары малого / бочки → отклонение от шестнадцатых сетки, окна 20 с
+            std::vector<std::pair<double, int>> hs;
+            if (auto* a = j["hits"].getArray()) for (auto& h : *a) { const double t = (double) h[0]; if ((double) h[2] > 0.7) hs.push_back ({ t, 0 }); if ((double) h[1] > 0.5) hs.push_back ({ t, 1 }); }
+            const auto& g = v.grid;
+            double worst = 0; int wins = 0;
+            for (double w0 = 0; w0 < g.back(); w0 += 20)
+                for (int kind : { 0, 1 })
+                {
+                    std::vector<double> e;
+                    for (auto& [t, k] : hs)
+                    {
+                        if (k != kind || t < w0 || t >= w0 + 20) continue;
+                        auto it = std::upper_bound (g.begin(), g.end(), t);
+                        if (it == g.begin() || it == g.end()) continue;
+                        const double a = *(it - 1), q = (*it - a) / 4;
+                        e.push_back (t - (a + std::round ((t - a) / q) * q));
+                    }
+                    if (e.size() < 12) continue;   // разреженные места (8 ударов за 20 с) не судим
+                    std::nth_element (e.begin(), e.begin() + (long) e.size() / 2, e.end());
+                    const double md = e[e.size() / 2] * 1000;
+                    if (std::abs (md) > 8.0) out ("      " + juce::String (w0, 0) + "-" + juce::String (w0 + 20, 0) + " s " + (kind ? "kick" : "snare") + ": " + juce::String (md, 1) + " ms (" + juce::String ((int) e.size()) + " hits)");
+                    worst = juce::jmax (worst, std::abs (md)); ++wins;
+                }
+            ok (wins > 6 && worst <= 10.0, juce::String (cs.dir) + ": drums on the grid, worst 20 s window " + juce::String (worst, 1) + " ms (" + juce::String (wins) + " windows)");
+        }
+        out (fails == 0 ? "realcases: passed" : "realcases: FAILED " + juce::String (fails));
+        return fails == 0 ? 0 : 1;
+    }
     if (cmd == "aftp" && argc >= 3)
     {   // R14 на данных автора (sound 16.11, shared/docs/arranger/R14-AFTP): удары Stemmer из кэшей v5/v6/v7 → fitSteadyGridHits;
         // приёмка: 138.000 BPM (доля 0.4347822 ± 1 мкс), такты каждые 4 доли от 0.93009 ± 2 мс, малый (корпус > 0.7) на сетке ≤ 5 мс (медиана)
